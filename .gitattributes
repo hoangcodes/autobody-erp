@@ -1,0 +1,34 @@
+# --- Line-ending policy for autobody-erp ---
+# Normalize ALL text files to LF inside the repo, and force LF on checkout
+# on every platform (including Windows). `eol=lf` overrides any machine's
+# core.autocrlf setting, so Git never converts LF<->CRLF and the
+# "LF will be replaced by CRLF" warning can never appear again — on any
+# computer you clone this repo onto.
+* text=auto eol=lf
+
+# Windows scripts genuinely need CRLF to execute reliably.
+*.bat  text eol=crlf
+*.cmd  text eol=crlf
+*.ps1  text eol=crlf
+
+# Treat common binary formats as binary so Git never touches their bytes.
+*.png   binary
+*.jpg   binary
+*.jpeg  binary
+*.gif   binary
+*.ico   binary
+*.webp  binary
+*.svg   text eol=lf
+*.pdf   binary
+*.zip   binary
+*.gz    binary
+*.tar   binary
+*.woff  binary
+*.woff2 binary
+*.ttf   binary
+*.eot   binary
+*.mp4   binary
+*.mov   binary
+*.docx  binary
+*.xlsx  binary
+*.pptx  binary
