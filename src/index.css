@@ -1,0 +1,121 @@
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+@layer base {
+  /* --------------------------------------------------------------------- */
+  /* Light theme (default). Brand = "AutoSuite Blue" #2B54D9.               */
+  /* --------------------------------------------------------------------- */
+  :root {
+    --background: 213 40% 98%;
+    --foreground: 222 47% 11%;
+
+    --card: 0 0% 100%;
+    --card-foreground: 222 47% 11%;
+
+    --popover: 0 0% 100%;
+    --popover-foreground: 222 47% 11%;
+
+    --muted: 214 32% 95%;
+    --muted-foreground: 215 16% 47%;
+
+    --primary: 226 70% 51%; /* #2B54D9 AutoSuite Blue */
+    --primary-foreground: 0 0% 100%;
+
+    --accent: 226 70% 96%;
+    --accent-foreground: 226 70% 40%;
+
+    --destructive: 4 76% 52%;
+    --destructive-foreground: 0 0% 100%;
+
+    --success: 142 71% 36%; /* #16A34A */
+    --success-foreground: 0 0% 100%;
+
+    --warning: 25 95% 48%; /* #EA580C */
+    --warning-foreground: 0 0% 100%;
+
+    --border: 214 25% 88%;
+    --input: 214 25% 88%;
+    --ring: 226 70% 51%;
+
+    /* Company-blue sidebar rail */
+    --sidebar: 226 70% 51%; /* #2B54D9 */
+    --sidebar-strong: 227 67% 43%; /* #2445B8 (gradient end) */
+    --sidebar-foreground: 0 0% 100%;
+
+    --radius: 0.6rem;
+  }
+
+  /* --------------------------------------------------------------------- */
+  /* Dark theme (toggled by adding `.dark` to <html>).                     */
+  /* --------------------------------------------------------------------- */
+  .dark {
+    --background: 222 47% 8%; /* ~#0B1220 */
+    --foreground: 210 20% 92%;
+
+    --card: 223 38% 13%; /* ~#151C2E */
+    --card-foreground: 210 20% 92%;
+
+    --popover: 223 38% 13%;
+    --popover-foreground: 210 20% 92%;
+
+    --muted: 220 26% 18%;
+    --muted-foreground: 215 18% 65%;
+
+    --primary: 225 78% 62%; /* lighter blue for contrast on dark */
+    --primary-foreground: 0 0% 100%;
+
+    --accent: 223 38% 18%;
+    --accent-foreground: 225 80% 80%;
+
+    --destructive: 4 70% 55%;
+    --destructive-foreground: 0 0% 100%;
+
+    --success: 142 60% 45%;
+    --success-foreground: 0 0% 100%;
+
+    --warning: 25 90% 55%;
+    --warning-foreground: 0 0% 100%;
+
+    --border: 220 20% 22%;
+    --input: 220 20% 24%;
+    --ring: 225 78% 62%;
+
+    /* Deep navy sidebar in dark mode (~#16224F) */
+    --sidebar: 227 57% 20%;
+    --sidebar-strong: 227 55% 15%;
+    --sidebar-foreground: 0 0% 100%;
+  }
+}
+
+@layer base {
+  * {
+    @apply border-border;
+  }
+  html,
+  body,
+  #root {
+    height: 100%;
+  }
+  body {
+    @apply bg-background text-foreground antialiased;
+    font-family: 'Inter', system-ui, -apple-system, 'Segoe UI', Roboto, sans-serif;
+    font-feature-settings: 'cv11', 'ss01';
+  }
+  ::selection {
+    @apply bg-primary-200 text-primary-900;
+  }
+}
+
+@layer utilities {
+  .scrollbar-thin {
+    scrollbar-width: thin;
+  }
+  .scrollbar-thin::-webkit-scrollbar {
+    width: 8px;
+    height: 8px;
+  }
+  .scrollbar-thin::-webkit-scrollbar-thumb {
+    @apply bg-muted-foreground/20 rounded-full;
+  }
+}

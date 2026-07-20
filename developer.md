@@ -455,54 +455,106 @@ type ReviewRequest = {
 
 Reports are read-models over the transactional data. Do not model them as first-class stored entities except for **saved report views** (`{ id; reportKey; filters; ownerUserId }`). Key derived metrics are defined in §E.9.
 
+## B.14 Audit log, activity timeline & system notes (traceability — first-class)
+
+Traceability is a core product requirement, not an afterthought. Two complementary layers record everything:
+
+**1. `AuditLog` — immutable, system-generated, compliance-grade.** The "who did what, when, and what changed" record.
+
+```ts
+type AuditLog = {
+  id; companyId; locationId;
+  entityType;            // 'order'|'service'|'line_item'|'payment'|'inventory'|'purchase_order'|'customer'|'vehicle'|'role'|'user'|'message'|'appointment'|...
+  entityId;
+  action;                // 'create'|'update'|'delete'|'status_change'|'auth_recorded'|'payment_captured'|'payment_refunded'|'inventory_adjusted'|'received'|'login'|...
+  actorId?;              // user id; null when system/automation
+  actorType: 'user' | 'system' | 'integration' | 'customer';
+  before?: Json;         // changed fields, prior values
+  after?: Json;          // changed fields, new values (field-level diff)
+  ip?; userAgent?;
+  at;                    // server UTC timestamp
+}
+```
+
+- **Append-only.** Never edited, never deleted (not even soft-deleted). Its own table, partitioned by month.
+- Written through the **event-bus/outbox** (§C.4) so no application code path can skip it.
+- **Minimum coverage:** order status transitions; line-item add/remove/quantity/price/cost changes; discount/fee changes; authorization recorded (method + who); payment captured/refunded/voided; deposit taken; inventory adjustments, receiving, and on-hand deltas; PO status changes; message sent/received/delivered/failed; role & permission changes; user login/logout; customer PII edits; integration sync results; setting changes (esp. tax, pricing matrix, payment config).
+- Surfaced read-only in an **Audit Log report/viewer** filterable by entity, actor, action, and date; each order also shows its own slice.
+
+**2. `OrderActivity` / `Note` — the human-facing timeline on each order.** A single reverse-chronological feed blending auto-generated system events with manual notes. This is what renders inside the kanban card detail (§J.2).
+
+```ts
+type OrderActivity = {
+  id; orderId;
+  kind: 'system_event' | 'user_note' | 'internal_message' | 'customer_message'
+      | 'status_change' | 'payment' | 'authorization' | 'inspection'
+      | 'assignment' | 'appointment' | 'part_event';
+  authorId?;                 // user who wrote a note; null for system events
+  visibility: 'internal' | 'customer_visible';
+  body?;                     // note text; supports @mentions and attachments
+  mentions?: string[];       // userIds @-mentioned → notified
+  refId?;                    // linked payment/message/inspection/PO/etc.
+  pinned?: boolean;
+  at;
+}
+```
+
+- **@mentions** notify the mentioned user (matches Shopmonkey's internal-notes-with-@mentions behavior).
+- **Internal** notes are never shown to customers; **customer-visible** notes can surface on shared links.
+- `pinned` notes stick to the top of the card timeline.
+- Every entry is also mirrored to `AuditLog` where it represents a state change; `OrderActivity` is the readable narrative, `AuditLog` is the forensic record.
+
 ---
 
 # PART C — ARCHITECTURE & TECH STACK
 
-## C.1 Chosen stack (modern TypeScript full-stack)
+## C.1 Chosen stack (React/TypeScript + Node.js + Supabase)
 
 | Layer | Choice | Rationale |
 |---|---|---|
-| Language | **TypeScript** end-to-end | One language, shared types between FE/BE |
-| Frontend | **Next.js (React) + App Router**, TypeScript | SSR/ISR, mature ecosystem, good for dashboard + public customer pages |
+| Language | **TypeScript** end-to-end (Node + React) | Shared types across FE/BE + Supabase's generated types; catches shape/schema mismatches across the ~30-entity domain |
+| Frontend | **React + Vite** (SPA), TypeScript | Fast dev/build; React Router for routing; add SSR later only if public-page SEO demands it |
 | UI | **Tailwind CSS + shadcn/ui + Radix** | Fast, accessible, own the design system (do NOT copy SM's UI) |
 | State/data | **TanStack Query** (server state) + Zustand (local UI) | Cache, optimistic updates for kanban |
-| Backend | **Node.js + NestJS** (or Fastify) in TypeScript | Structured modules, DI, good for a large domain |
-| API style | **REST + OpenAPI**, plus **webhooks**; consider tRPC for internal FE↔BE | REST matches the resource-heavy domain; webhooks are table-stakes (SM exposes them on all tiers) |
-| Realtime | **WebSockets (Socket.IO)** or Ably/Pusher | Kanban board, messaging, time-clock live updates |
-| DB | **PostgreSQL** | Relational domain, strong constraints, JSONB for flexible bits |
-| ORM | **Prisma** | Type-safe, migrations, matches TS stack |
+| Backend | **Node.js + Express** (or Fastify), TypeScript | Custom API for business logic, integrations, and the pricing engine |
+| Data platform | **Supabase** | Managed Postgres + Auth + Storage + Realtime + auto REST (PostgREST) in one service |
+| API style | **REST + webhooks** from the Node API; Supabase client used directly for simple reads/realtime | Node API owns writes and business logic; Supabase handles auth, storage, realtime, and simple CRUD |
+| Realtime | **Supabase Realtime** (Postgres change streams) | Kanban board, messaging, time-clock live updates — no separate WebSocket server to run |
+| DB | **Supabase Postgres** | Relational domain, strong constraints, JSONB for flexible bits; RLS for tenancy |
+| DB access (Node) | **supabase-js** + **Drizzle** (or Prisma) for schema/migrations | Migrations run against the Supabase connection string; supabase-js for app queries |
+| Auth | **Supabase Auth** | Email+password, Google OAuth, JWTs; RLS policies key off the JWT claims |
+| File storage | **Supabase Storage** (S3-backed) | Inspection photos/videos, signatures, attachments |
 | Cache/queue | **Redis** + **BullMQ** | Job queue for messaging, campaigns, syncs, reminders |
-| Search | **Postgres FTS** first; **OpenSearch** later | Customer/vehicle/order search |
-| File storage | **S3-compatible** (AWS S3 / R2) | Inspection photos/videos, signatures, attachments |
-| Auth | **Auth.js/Clerk/WorkOS** | Email+password, Google SSO, org/multi-tenant |
+| Search | **Postgres FTS** (built into Supabase) first; OpenSearch later | Customer/vehicle/order search |
 | Payments | **Stripe** (Connect + Terminal) | Card-present + online + payouts + surcharging; avoid building a processor |
-| Infra | **Docker**, deploy on AWS/Fly/Render; IaC via Terraform | Standard |
-| Observability | **Sentry + OpenTelemetry + Datadog/Grafana** | Errors, traces, metrics |
-| CI/CD | **GitHub Actions** | Lint/test/build/deploy |
+| Infra | **Supabase (managed)** + **Docker** for the Node API/worker on Fly/Render/Railway | Supabase hosts DB/auth/storage/realtime; you host the API + worker |
+| Observability | **Sentry** + Supabase logs + optional Grafana | Errors, traces, metrics |
+| CI/CD | **GitHub Actions** + **Supabase CLI** | Lint/test/build/deploy; CLI applies DB migrations |
 
-> If the team is Python-strong instead, the backend could be FastAPI + SQLAlchemy with the same Postgres/Redis/S3; the frontend and domain model are unchanged. We chose full-TS for shared types and hiring depth.
+> **Supabase division of labor.** Supabase is not just a database — it also provides Auth, Storage, Realtime, and an auto-generated REST API (PostgREST). The Node API therefore shrinks to what genuinely needs server-side logic: the pricing/totals engine, third-party integrations (Stripe, Twilio, MOTOR, PartsTech, QuickBooks), webhook handling, and background jobs. Simple CRUD and realtime subscriptions can go straight from the React app to Supabase, protected by RLS.
 
 ## C.2 Multi-tenancy model
 
-- **Single database, shared schema, row-level tenant scoping** by `companyId`/`locationId`. Enforce with Postgres **Row-Level Security (RLS)** and an application-level tenant guard (belt and suspenders).
+- **Single database, shared schema, row-level tenant scoping** by `companyId`/`locationId`. Enforce with **Supabase Row-Level Security (RLS)** policies that read the tenant claim from the Supabase Auth JWT, plus an application-level tenant guard in the Node API (belt and suspenders).
 - Every query goes through a tenant context (from the authenticated session). No cross-tenant reads without an explicit HQ scope.
 - Consider schema-per-tenant only if a large enterprise customer demands isolation; default is row-level.
 
 ## C.3 Service decomposition (modular monolith first)
 
-Start as a **modular monolith** (NestJS modules), extract services only when scale demands:
+Start as a **modular monolith** (Express route modules + a domain service layer), extract services only when scale demands:
 
 ```
 apps/
-  web/            Next.js app (dashboard + public customer pages)
-  api/            NestJS backend
+  web/            React + Vite app (dashboard + public customer pages)
+  api/            Node.js + Express backend (business logic, integrations)
   worker/         BullMQ workers (messaging, campaigns, syncs, reminders)
+supabase/
+  migrations/     SQL migrations (Supabase CLI)
+  policies/       RLS policies
 packages/
-  db/             Prisma schema + client
-  types/          Shared domain types & zod schemas
-  ui/             Shared component library
-  sdk/            Typed API client (also basis for public API SDK)
+  types/          Shared TS domain types + zod schemas
+  ui/             Shared React component library
+  sdk/            API client (also basis for public API SDK)
 ```
 
 Domain modules inside `api/`: `orders`, `catalog`, `inventory`, `purchasing`, `customers`, `vehicles`, `scheduling`, `inspections`, `payments`, `messaging`, `marketing`, `reporting`, `iam` (users/roles), `integrations`, `hq`.
@@ -746,9 +798,122 @@ HQ hierarchy + cross-location reporting/campaigns, roles at HQ scope, public RES
 
 ---
 
+# PART J — UI/UX & SCREEN SPECIFICATIONS
+
+> Derived from Shopmonkey's public overview video ("Shopmonkey Overview," chapters: Workflow → Estimates → Customer Communication → Calendar → DVI → Invoicing & Payment) and messaging video ("Customer Messaging Made Easy"), plus the public help center. This section documents **screen structure, information architecture, and interaction patterns** so we can build a functionally equivalent product with our **own** visual design — not a pixel copy (see §G.7 for the IP guardrail). Where a detail is inferred rather than confirmed on video, it's marked ⚠️.
+
+## J.1 Global layout & shell
+
+- **Left vertical nav** (primary sections): Workflow, Calendar, Messages, Customers, Inventory, Reports, Settings. Collapsible; icons + labels. Unread badges on Messages.
+- **Top bar** (persistent): global **search** (customers, vehicles, orders — by name, phone, license plate, VIN, RO number); global **"+ Add"** (New Estimate / Appointment / Customer); **notifications** bell; **messages** indicator; **location switcher** (multi-location); user/account menu.
+- **Content area**: list view, board view, or detail pane depending on section.
+- **Realtime everywhere**: board cards, message threads, and notifications update live via Supabase Realtime — no manual refresh.
+
+## J.2 Workflow board (the priority screen) — deep dive
+
+This is the operational heart: "keeping track of cars." It is a **kanban board** where each card is an Order (a car/job) moving left-to-right through shop-defined columns.
+
+**View modes** (tabs on the board): **Columns** (kanban), **List** (sortable table), **Parts & Tires** (work grouped by part status).
+
+**Columns**
+- Shop-defined and fully editable: add, rename, reorder (drag), hide (per-user), delete. Example default set: *Estimates · Dropped Off · In Progress · Waiting on Parts · Ready for Pickup · Invoices*.
+- Each column carries optional **rules**: Convert to Repair Order, Convert to Invoice, Archive Paid Orders, Archive When Inactive after N days.
+- Dragging a card into a column **applies that column's rule** — e.g. dropping into "Invoices" converts the order status to invoice (see the dual-status model, §A.2). This is the key interaction; it must be transactional and logged to the timeline + audit log.
+- Card density toggle: Standard / Condensed.
+
+**Card front (at-a-glance)** — each card shows:
+- Customer name + vehicle (year/make/model), RO/order number.
+- Status chips: order status (Estimate/RO/Invoice), authorization state, paid/unpaid + balance due.
+- Assigned technician avatar(s) and service writer.
+- Total labor hours and $ total.
+- Promised/due time (with an overdue indicator), and a "last activity" timestamp.
+- Small indicators: unread customer message, inspection status, waiting-on-parts, deposit taken. ⚠️ exact icon set is ours to design.
+
+**Card detail (opens on click — the "car's full record")** — organized in tabs. Given the priority on detail and audit trails, this is spec'd richly:
+
+1. **Overview** — customer + vehicle block (with service history link), the Services → line items editor (labor/parts/tires/fees), live totals, authorization status per service, assigned techs, promised time.
+2. **Inspections** — DVIs attached to this order, status per item, media, send-to-customer.
+3. **Messages** — the two-way SMS/email thread for this customer inline on the order (send estimate/invoice/photos/status with one click; see J.4).
+4. **Payments** — payments taken, balance due, deposits, "Collect Payment" button (see J.5).
+5. **Activity / Timeline** — **the audit-rich feed** (backed by `OrderActivity` + `AuditLog`, §B.14). Reverse-chronological, showing:
+   - every status change (who moved the card, from/to which column, when);
+   - every line-item edit (added "Brake pads", price changed $45→$52, by whom);
+   - authorizations (customer approved Service X online with e-signature at time; or "verbal approval recorded by J. Doe");
+   - payments (captured $220 credit card, refunded, deposit taken);
+   - messages sent/received; inspection completed; technician assigned; appointment linked;
+   - **manual notes** with @mentions (internal or customer-visible), pinnable.
+   - Each entry: actor (user/system/customer/integration), timestamp, and a "what changed" diff on hover. Filterable by type (notes / system events / payments / messages).
+
+**Board-level behaviors**
+- Filter by column, technician, service writer, date, tag, status.
+- Search within board.
+- Live updates as other users move cards or customers respond.
+
+## J.3 Estimate / Repair Order / Invoice editor
+
+One editor, three statuses (§A.2). Left: Services accordion (each Service expands to line items of type labor/part/tire/subcontract/fee, plus service-level discount/shop-supplies/EPA). Right rail: customer/vehicle, totals (subtotal, discounts, fees, tax, total, and staff-only cost + gross profit), authorization panel, assignments, checklist. Top actions: **Send** (choose SMS/email + toggles: allow online payment, request authorization, request e-signature, show inspections/messages/history), Convert (to RO/Invoice), Collect Payment, Print. Add-line sources: manual, canned service, labor-guide lookup, parts-vendor search.
+
+## J.4 Messaging center (priority feature)
+
+Confirmed behaviors from the messaging video, spec'd for build:
+
+- **Two-way texting and email** from inside the app; send method defaults to the customer's **preferred contact method**.
+- **Global Messages view**: conversation list (search by name/phone, recent threads, unread badges) + thread pane. Also embedded **per-order** (J.2 tab 3).
+- **One-click sends** of: estimates, invoices, digital inspections, **pictures**, job/status updates, and **payment requests** (text-to-pay link).
+- **Automation hooks**: automated **appointment reminders** (reduce no-shows); estimate-authorization requests; invoice payment requests.
+- **Instant notifications to the shop** when a customer: authorizes work, cancels an appointment, replies with a question, or makes a payment. These fire into the notifications system (J.6) and the order timeline (J.2 tab 5).
+- **Full message history** retained on the customer profile and viewable any time; every message logged to `AuditLog` (sent/received/delivered/failed) — see `Message` entity §B.12.
+- Attachments supported; message templates for common sends.
+- Two numbers under the hood: a **transactional** messaging number and a separate **marketing** number (opt-in/opt-out compliant) — §B.12, §G.3.
+
+## J.5 Checkout / collect payment (priority feature)
+
+Triggered by "Collect Payment" on an order (typically once work is done and it's an Invoice, but deposits can be taken earlier).
+
+**Checkout modal — tender selection.** Support all of:
+- **Cash** — enter amount tendered; system computes **change due**; updates the cash drawer (§B.11 `CashDrawer`).
+- **Check** — enter amount + **check/reference number**.
+- **Debit card** and **Credit card** — processed via the integrated processor (Stripe): **card-present** through a connected reader (Stripe Terminal) or **online / text-to-pay** via a payment link the customer opens on their phone.
+- **ACH bank transfer**, **BNPL** (Sunbit/Affirm — shop paid in full immediately), and **Other/gift** as additional tenders.
+- **Split payments**: multiple tenders against one invoice (e.g. $100 cash + remainder on card); running balance-due updates until $0.
+- On success: mark line/order paid, optionally auto-convert fully-paid order → Invoice, send receipt (SMS/email), log to timeline + audit log, decrement inventory for invoiced parts.
+
+**Card-payment mechanics (build detail).**
+- **In person:** app sends the amount to the paired reader; reader captures chip/tap/contactless; result returns to the order. Optional **surcharge on credit only** (never debit/ACH/BNPL), configurable.
+- **Remote:** "Text to pay" / "Email invoice" sends a secure link; customer pays on the hosted page; webhook marks the order paid in realtime.
+- **Deposits:** share estimate with "Allow Online Payment" + "Request Deposit"; customer prepays before work.
+
+> **Compliance (non-negotiable, §G.2):** raw card data never touches our servers. Use Stripe Elements (web) and Stripe Terminal (in-person) so we stay in PCI SAQ-A scope. We store only processor tokens/refs, never PANs. Entering card numbers on a customer's behalf is out of scope by policy — the customer taps/enters their own card on the reader or hosted page.
+
+## J.6 "Set up credit card payments" — merchant onboarding flow (Settings → Payments)
+
+The ability for a shop to *turn on* card payments. A guided setup:
+1. **Connect payments account** — launch Stripe Connect onboarding (business details, identity, **bank account for payouts**). We never handle those credentials directly; Stripe's hosted onboarding does. Status shown as Not started / Pending / Active.
+2. **Order / pair a card reader** — register a Stripe Terminal reader (WisePOS-class); pair to the location; test transaction.
+3. **Configure options** — surcharge on/off (credit-only), default "allow online payment on invoices," receipt templates, tip settings ⚠️ if desired, payout schedule / instant payouts.
+4. **Tax & accounting mapping** — tax rate + per-category taxability (§B.9), and QuickBooks item mapping if connected.
+5. **Go live** — once Connect status = Active and a reader is paired, "Collect Payment" (J.5) exposes card tenders.
+
+Every step writes to `AuditLog` (setting changes, account status) so payment-config history is fully traceable.
+
+## J.7 Notifications
+
+A bell + feed for shop-side events: customer authorized work, appointment confirmed/canceled, customer replied, payment received, part received, @mention in a note. Deep-links to the relevant order/thread. Backed by the same event bus that feeds the audit log.
+
+## J.8 Other screens (structure only)
+
+Calendar (day/week, group-by-tech, color filter, appointment create with reminders + online-booking widget), Customers/Vehicles (list + profile with history and deferred-service suggestions), Inventory (Parts/Tires/Bulk Adjustments + POs + returns), Reports (catalog + KPI dashboard, §E.9), Settings (workflow columns, roles & permissions, fees & taxes, integrations, messaging numbers, payments per J.6).
+
+---
+
 # PART I — SOURCES & CONFIDENCE
 
 Feature research grounded primarily in Shopmonkey's public help center (support.shopmonkey.io), pricing page (shopmonkey.io/pricing, verified 2026-07-02), product pages, and developer docs (shopmonkey.dev, github.com/shopmonkeyus), cross-checked against Tekmetric, Mitchell 1 (Manager SE / ProDemand), Shop-Ware, and AutoLeap, plus review directories (Capterra, G2, Software Advice).
+
+**Video sources (Part J):**
+- "Shopmonkey Overview - Shop Management Software" (youtube.com/watch?v=AOwTejOhzNs, published 2025-05-05) — chapters confirm the feature flow: Workflow → Creating Estimates → Customer Communication → Calendar & Appointments → Digital Vehicle Inspections → Invoicing & Collecting Payment.
+- "Customer Messaging Made Easy for Auto Repair Shops" (youtube.com/watch?v=UGVuWmDi-Ec, published 2025-07-11) — full transcript captured; confirms two-way texting + email, one-click sends of estimates/invoices/pictures/status, automated appointment reminders, instant shop notifications on customer authorize/cancel/reply/pay, and always-available message history (all reflected in §J.4).
+- **Limitation:** video *narration and chapters* were captured, but individual UI frames/pixels were not extracted (I can't watch video playback). Part J documents screen structure and interaction patterns for an original design, not a visual clone.
 
 **Items to verify before building (⚠️):**
 1. Parts integrations beyond PartsTech/Nexpart/WorldPac/RepairLink (Epicor/FleetNet unconfirmed).
