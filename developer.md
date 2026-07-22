@@ -23,6 +23,24 @@ This is the master build spec for **AutoSuite**. It is intended to be handed to 
 
 > **Confidence markers.** Items marked ⚠️ are inferred or unverified against primary sources and should be confirmed before committing engineering effort. Everything else is grounded in Shopmonkey's public help center, pricing page, or developer docs (see §I, Sources).
 
+## 0.1 Implementation status / divergences (current build)
+
+This spec describes the target product. The build today is a **mock-data
+frontend**: the React app (`autobody-erp-frontend`) runs against an in-memory
+mock API (`VITE_USE_MOCKS=true`, `src/mocks/*`) behind a single data seam
+(`src/lib/dataClient.ts`), so every screen renders and mutates without a server.
+The **Node/Express + Supabase backend** (`autobody-erp-backend`) is scaffolded
+separately and not yet wired in; flipping `VITE_USE_MOCKS=false` (+ `VITE_API_URL`)
+swaps the mock for the real REST client with no component changes.
+
+Areas that are **mock / UI-only** so far (no backend enforcement or persistence
+beyond localStorage): **roles & permissions** (a display/selection role switch,
+no RBAC), **profile photos** (localStorage data-URLs), **notifications** (a mock
+feed, no event bus), and the **financial statements / reports** (mock GL data;
+there is no real ledger — see §A.4, §B.13). Where the shipped UI diverges from or
+extends this spec, an inline "Current implementation" note calls it out
+(see §J.1, §J.2, §J.4, §J.7, §J.8, §J.9).
+
 ---
 
 # PART A — PRODUCT & SCOPE
@@ -133,8 +151,7 @@ type Customer = {
   firstName?; lastName?; companyName?;
   contacts: Contact[];            // phones, emails, each with a label
   preferredContactMethod: 'sms'|'email'|'phone';
-  preferredLanguage;
-  referralSource?;
+  referralSource?;                // google|referral|social_media|repeat_customer|walk_in|other
   fleetId?;                       // membership in a fleet
   tags: string[];
   taxExempt: boolean;
@@ -142,6 +159,16 @@ type Customer = {
   laborMatrixOverrideId?;
   specialRates?;                  // per-customer fee/rate overrides
   marketingConsent: { optedIn: boolean; optInId?; optInDate?; source? };
+  // ---- demographics / intake (individual customers) ----
+  gender?: 'male' | 'female';
+  dob?;                           // 'YYYY-MM-DD' OR year-only 'YYYY' (imprecise DOB)
+  ageRange?: '<18'|'18-24'|'25-34'|'35-44'|'45-54'|'55-64'|'65+';  // AUTO-derived from dob when present; else manual
+  ethnicity?;
+  primaryLanguages?: string[];    // multi-select; legacy singular `primaryLanguage` kept + mirrored (first)
+  primaryLanguage?;               // @deprecated back-compat
+  speaksEnglish?: boolean;
+  driverLicenseNumber?; driverLicenseState?; driverLicenseExp?;
+  city?; state?;                  // where the customer is from
 }
 
 type Fleet = {
@@ -183,6 +210,16 @@ type Order = {
   totals: OrderTotals;            // computed: subtotal, discounts, fees, tax, total, cost, grossProfit
   paidTotal; balanceDue;
   invoicedAt?; fullyPaidAt?;
+  // ---- board-card / detail fields (see §J.2, §J.3) ----
+  title?;                         // short human title, e.g. "Water Pump R&R and 3 More"
+  description?;                   // free-text job description (Jira-style)
+  labels?: { id; text; color }[]; // colored chips → future `labels` catalog + `order_labels` join
+  mechanicIds?: string[];         // team members assigned to the car → User; future `order_assignments`
+  photos?: { id; url; sortOrder }[]; // vehicle photos; lowest sortOrder = card thumbnail; future `vehicle_photos`
+  effort?: 'low'|'medium'|'high'; // relative complexity → card effort icon + Details field
+  priority?: 'low'|'medium'|'high';
+  startDate?;                     // scheduled start ('YYYY-MM-DD')
+  technicianName?;                // denormalized lead-tech display (derive from LineItem.assignedTechnicianId)
   // relations:
   services: Service[];
   inspections: Inspection[];
@@ -427,6 +464,14 @@ type Message = {
   body; attachments?: Media[];
   status: 'queued'|'sent'|'delivered'|'read'|'failed';  // read only reliable for email
   at;
+}
+
+type Notification = {                // shop-side bell feed (see §J.7)
+  id; locationId;
+  type: 'message'|'appointment'|'payment'|'part'|'dvi'|'mention'|'inventory';
+  title; body;
+  at; read: boolean;
+  refId?;                            // linked order/thread/appointment for deep-link
 }
 
 type Campaign = {
@@ -809,6 +854,15 @@ HQ hierarchy + cross-location reporting/campaigns, roles at HQ scope, public RES
 - **Content area**: list view, board view, or detail pane depending on section.
 - **Realtime everywhere**: board cards, message threads, and notifications update live via Supabase Realtime — no manual refresh.
 
+> **Current implementation.** The shipped left nav is *Calendar · Backlog ·
+> Workflow (→ Completed / Invoiced) · Customers · Inventory · Reports · Settings*
+> — there is **no Messages item** (messaging is the top-bar dock, §J.4), and the
+> theme toggle sits above the sidebar collapse. The top bar shows the company
+> **`BrandLogo`** (drop-in asset, §J.9), the active location name (bold) with a
+> NetSuite-style **Account ID** + a **PRODUCTION** pill, global search, +Add, the
+> messenger icon, a bordered bell, and the profile block (name + role, photo
+> upload, role switch, location switch).
+
 ## J.2 Workflow board (the priority screen) — deep dive
 
 This is the operational heart: "keeping track of cars." It is a **kanban board** where each card is an Order (a car/job) moving left-to-right through shop-defined columns.
@@ -816,22 +870,31 @@ This is the operational heart: "keeping track of cars." It is a **kanban board**
 **View modes** (tabs on the board): **Columns** (kanban), **List** (sortable table), **Parts & Tires** (work grouped by part status).
 
 **Columns**
-- Shop-defined and fully editable: add, rename, reorder (drag), hide (per-user), delete. Example default set: *Estimates · Dropped Off · In Progress · Waiting on Parts · Ready for Pickup · Invoices*.
+- Shop-defined and fully editable: add, rename, reorder (drag), archive (soft-delete, hidden not destroyed), delete. Example default set: *Estimates · Dropped Off · In Progress · Waiting on Parts · Ready for Pickup · Invoices*.
 - Each column carries optional **rules**: Convert to Repair Order, Convert to Invoice, Archive Paid Orders, Archive When Inactive after N days.
 - Dragging a card into a column **applies that column's rule** — e.g. dropping into "Invoices" converts the order status to invoice (see the dual-status model, §A.2). This is the key interaction; it must be transactional and logged to the timeline + audit log.
 - Card density toggle: Standard / Condensed.
+- Drag UX: a dashed landing placeholder marks the drop position and cards settle with a drop animation.
 
-**Card front (at-a-glance)** — each card shows:
-- Customer name + vehicle (year/make/model), RO/order number.
-- Status chips: order status (Estimate/RO/Invoice), authorization state, paid/unpaid + balance due.
-- Assigned technician avatar(s) and service writer.
-- Total labor hours and $ total.
-- Promised/due time (with an overdue indicator), and a "last activity" timestamp.
-- Small indicators: unread customer message, inspection status, waiting-on-parts, deposit taken. ⚠️ exact icon set is ours to design.
+> **Current implementation.** The shipped column set is *To Do · In Progress ·
+> Pending · Invoices · Ready for Pickup · Done* (from mock `workflow_statuses`).
+> Rename + archive are wired; the "+ Add column" affordance is present but hidden
+> in the UI. Columns are content-height, capped at the viewport with an internal
+> scroll and a pinned "+ Create" footer (inline card creation into that column).
+> The board has its own local search and a mechanic-avatar filter cluster,
+> separate from the top-bar global search.
+
+**Card front (at-a-glance)** — each card shows (as implemented on `OrderCard`):
+- A **vehicle photo thumbnail** at the top (drop-in `/car-photos/<vehicleId>.jpg` → order `photos[]` → generated placeholder).
+- The job **title** and **colored label chips** (`Order.labels`).
+- Vehicle line ("color year make model") with a per-make brand mark, and the lead technician.
+- Footer: overlapping **mechanic avatars** (`Order.mechanicIds`, overflow "+N") on top, then an **effort icon** (low/medium/high) + the `#number` below them, with the **$ total** and **paid/remaining** pinned right.
+- Other intended indicators (unread message, inspection status, waiting-on-parts, deposit): ⚠️ our icon set to design.
+- `Order.effort` and `Order.priority` are first-class card/detail fields (effort drives the card icon; both are edited in the detail Details panel).
 
 **Card detail (opens on click — the "car's full record")** — organized in tabs. Given the priority on detail and audit trails, this is spec'd richly:
 
-1. **Overview** — customer + vehicle block (with service history link), the Services → line items editor (labor/parts/tires/fees), live totals, authorization status per service, assigned techs, promised time.
+1. **Overview** — implemented as a Jira-issue-style 3-column layout: **main** (Services → line-items editor, an inline-editable **Description**, and a **Photos** carousel) | **Details** (a field form: Vehicle, Assignee→`mechanicIds`, Customer, Labels, Year/Make/Model/Color [mandatory; Make/Model/Color allow "+New" and persist onto the Vehicle], Start date, Priority, Effort) | **Invoice** (live totals + Send / Convert / Collect Payment / Print / Email / SMS). The modal header has an inline-editable job title.
 2. **Inspections** — DVIs attached to this order, status per item, media, send-to-customer.
 3. **Messages** — the two-way SMS/email thread for this customer inline on the order (send estimate/invoice/photos/status with one click; see J.4).
 4. **Payments** — payments taken, balance due, deposits, "Collect Payment" button (see J.5).
@@ -865,6 +928,16 @@ Confirmed behaviors from the messaging video, spec'd for build:
 - **Full message history** retained on the customer profile and viewable any time; every message logged to `AuditLog` (sent/received/delivered/failed) — see `Message` entity §B.12.
 - Attachments supported; message templates for common sends.
 - Two numbers under the hood: a **transactional** messaging number and a separate **marketing** number (opt-in/opt-out compliant) — §B.12, §G.3.
+
+> **Current implementation (Facebook-style dock).** Messaging is not a sidebar
+> page; it is a global dock rendered from the app shell (state in a `chatDock`
+> store). The top-bar messenger icon opens a right-hugging **Chats dropdown**
+> (All/Unread + search); a bottom-right launcher opens a **New message** window
+> whose To: picker searches both customers and team members (its composer stays
+> hidden until a recipient is chosen); selecting a conversation opens a docked
+> chat window (windows stack, capped with a "+N more" overflow, each
+> minimize/close). The composer collapses its media cluster into a "+" while
+> typing. Conversation rows are derived from `Message` grouped by `customerId`.
 
 ## J.5 Checkout / collect payment (priority feature)
 
@@ -900,9 +973,33 @@ Every step writes to `AuditLog` (setting changes, account status) so payment-con
 
 A bell + feed for shop-side events: customer authorized work, appointment confirmed/canceled, customer replied, payment received, part received, @mention in a note. Deep-links to the relevant order/thread. Backed by the same event bus that feeds the audit log.
 
+> **Current implementation.** A bordered top-bar bell opens a bounded All/Unread
+> dropdown fed by a mock `notifications` collection (the `Notification` entity,
+> §B.12), with a per-type icon/tint and an unread badge. The Chats and
+> Notifications dropdowns share identical fixed geometry and are mutually
+> exclusive. Notifications are **mock/UI-only** today (no event bus yet).
+
 ## J.8 Other screens (structure only)
 
-Calendar (day/week, group-by-tech, color filter, appointment create with reminders + online-booking widget), Customers/Vehicles (list + profile with history and deferred-service suggestions), Inventory (Parts/Tires/Bulk Adjustments + POs + returns), Reports (catalog + KPI dashboard, §E.9), Settings (workflow columns, roles & permissions, fees & taxes, integrations, messaging numbers, payments per J.6).
+Calendar (day/week, group-by-tech, color filter, appointment create with reminders + online-booking widget), Customers/Vehicles (list + grid views + profile with history, demographic intake, and deferred-service suggestions), Inventory (Parts/Tires/Bulk Adjustments + POs + returns), Reports (catalog + KPI dashboard, §E.9), Settings (workflow columns, roles & permissions, fees & taxes, integrations, messaging numbers, payments per J.6).
+
+> **Reports — current implementation.** Reports ships as an SEC-filing-style
+> financial view: **Income Statement** and **Balance Sheet** tabs with a sticky
+> customization footer (Month/Quarter/Year granularity + a multi-period select
+> that drives one statement column per selected period), line drill-down, a KPI
+> strip, and client-side .xlsx export. Figures are **mock GL data** — a real
+> ledger/chart of accounts remains out of scope (§B.13, §A.4); production reports
+> stay read-models.
+
+## J.9 Brand & vehicle imagery (drop-in assets)
+
+No copyrighted logos or photos are bundled; the UI ships generated placeholders
+and picks up real assets when dropped in (served from the site root):
+- `public/abs-autobody-logo.png` — company logo (`BrandLogo`; white-vector emblem fallback).
+- `public/car-logos/<make>.png` — per-make logo (`CarBrandMark`; monogram → car-icon fallback).
+- `public/car-photos/<vehicleId>.jpg` — real vehicle photo for the board card + carousel
+  (falls back to the order's `photos[]`, then a placeholder). These map to a future
+  `vehicle_photos` / `media` table; the drop-in file itself is a read-only preview.
 
 ---
 
