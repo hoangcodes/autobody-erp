@@ -88,11 +88,20 @@ export default {
           from: { opacity: '0', transform: 'translate(-50%, -50%) scale(0.97)' },
           to: { opacity: '1', transform: 'translate(-50%, -50%) scale(1)' },
         },
+        // Green "just moved here" confirmation flash on a card after a drop.
+        // Fades smoothly all the way to transparent so the tail never "snaps"
+        // off; the animation owns its own lifetime (cleared on animationend).
+        'flash-green': {
+          '0%': { boxShadow: '0 0 0 0 rgba(22,163,74,0.55)', backgroundColor: 'rgba(22,163,74,0.18)' },
+          '50%': { boxShadow: '0 0 0 6px rgba(22,163,74,0.14)', backgroundColor: 'rgba(22,163,74,0.12)' },
+          '100%': { boxShadow: '0 0 0 12px rgba(22,163,74,0)', backgroundColor: 'transparent' },
+        },
       },
       animation: {
         'fade-in': 'fade-in 0.15s ease-out',
         'slide-up': 'slide-up 0.18s ease-out',
         'dialog-in': 'dialog-in 0.18s ease-out',
+        'flash-green': 'flash-green 1.1s ease-out',
       },
     },
   },

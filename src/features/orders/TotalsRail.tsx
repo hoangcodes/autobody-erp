@@ -1,5 +1,5 @@
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/Card'
-import { formatMoney, formatPercent } from '@/lib/utils'
+import { formatMoney } from '@/lib/utils'
 import type { OrderTotals } from '@/types'
 
 /** When `bare` is set the totals render without the surrounding Card/header, so
@@ -7,11 +7,9 @@ import type { OrderTotals } from '@/types'
  * order-detail "Invoice" section. */
 export function TotalsRail({
   totals,
-  showStaffCost = true,
   bare = false,
 }: {
   totals: OrderTotals | undefined
-  showStaffCost?: boolean
   bare?: boolean
 }) {
   const t = totals ?? {
@@ -45,24 +43,6 @@ export function TotalsRail({
         <span>Total</span>
         <span>{formatMoney(t.total)}</span>
       </div>
-
-      {showStaffCost && (
-        <div className="mt-3 space-y-1.5 rounded-md bg-muted/60 p-2.5 text-xs">
-          <p className="font-semibold uppercase tracking-wide text-muted-foreground">Staff only</p>
-          <div className="flex items-center justify-between">
-            <span className="text-muted-foreground">Cost</span>
-            <span className="font-medium">{formatMoney(t.costTotal)}</span>
-          </div>
-          <div className="flex items-center justify-between">
-            <span className="text-muted-foreground">Gross profit</span>
-            <span className="font-medium">{formatMoney(t.grossProfit)}</span>
-          </div>
-          <div className="flex items-center justify-between">
-            <span className="text-muted-foreground">Margin</span>
-            <span className="font-medium">{formatPercent(t.grossMarginPct)}</span>
-          </div>
-        </div>
-      )}
     </div>
   )
 

@@ -3,23 +3,22 @@ import {
   DndContext,
   DragOverlay,
   PointerSensor,
+  closestCorners,
   useSensor,
   useSensors,
-  defaultDropAnimationSideEffects,
   type DragEndEvent,
   type DragStartEvent,
   type DragOverEvent,
-  type DropAnimation,
 } from '@dnd-kit/core'
 import { useSearchParams } from 'react-router-dom'
-import { List, LayoutGrid, Rows3, Wrench, Plus, MoreHorizontal, Filter, X, Search, Check } from 'lucide-react'
+import { List, LayoutGrid, Wrench, Plus, Filter, X, Search, Check } from 'lucide-react'
 import {
   useWorkflowStatuses,
   useCreateWorkflowStatus,
   useArchiveWorkflowStatus,
   useUpdateWorkflowStatus,
 } from '@/hooks/useWorkflowStatuses'
-import { useOrders, useCreateOrder } from '@/hooks/useOrders'
+import { useOrders } from '@/hooks/useOrders'
 import { useMoveCard } from '@/hooks/useMoveCard'
 import { toast } from '@/components/ui/toastStore'
 import { useCustomerDirectory } from '@/hooks/useCustomers'
@@ -29,8 +28,10 @@ import { useProfilePhotos } from '@/features/auth/profilePhotoStore'
 import { Column } from '@/features/workflow/Column'
 import { OrderCard } from '@/features/workflow/OrderCard'
 import { OrderDetailDrawer } from '@/features/workflow/OrderDetailDrawer'
+import { NewJobModal } from '@/features/workflow/NewJobModal'
 import { MechanicAvatar } from '@/components/MechanicAvatar'
 import { Button } from '@/components/ui/Button'
+import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogBody, DialogFooter } from '@/components/ui/Dialog'
 import { DataTable } from '@/components/DataTable'
 import { Skeleton } from '@/components/ui/Skeleton'
 import { ErrorState, EmptyState } from '@/components/ui/EmptyState'
@@ -39,18 +40,7 @@ import { cn, customerDisplayName, formatMoney, vehicleDisplayName } from '@/lib/
 import { ORDER_STATUS_LABEL, ORDER_STATUS_VARIANT } from '@/features/orders/statusDisplay'
 import type { Order } from '@/types'
 
-type BoardView = 'board' | 'condensed' | 'list' | 'parts'
-
-// Smooth "settle" when a card is dropped instead of an instant jump. The lifted
-// overlay animates back to rest while the original fades out from its dragging
-// state, so the move reads as a physical drop.
-const DROP_ANIMATION: DropAnimation = {
-  duration: 220,
-  easing: 'cubic-bezier(0.18, 0.67, 0.6, 1.22)',
-  sideEffects: defaultDropAnimationSideEffects({
-    styles: { active: { opacity: '0.4' } },
-  }),
-}
+type BoardView = 'board' | 'list' | 'parts'
 
 interface FilterChip {
   id: string
@@ -65,13 +55,18 @@ export function KanbanBoard() {
   // ?search= param (so the global search can hand off), then fully editable here.
   const [search, setSearch] = React.useState(params.get('search') ?? '')
   const [selectedOrderId, setSelectedOrderId] = React.useState<string | null>(params.get('order'))
+  // Create-job modal (opened from the "+ New Job" toolbar button).
+  const [newJobOpen, setNewJobOpen] = React.useState(false)
   const [activeOrder, setActiveOrder] = React.useState<Order | null>(null)
   const [overColumnId, setOverColumnId] = React.useState<string | null>(null)
+  // The column awaiting archive confirmation (opens the in-app Dialog).
+  const [pendingArchive, setPendingArchive] = React.useState<{ id: string; name: string } | null>(null)
   // Mechanic-avatar filter: show only cards that include at least one selected
   // mechanic (empty = no filter). The column being created into (for the footer
   // "+ Create" spinner) is tracked separately.
   const [mechanicFilter, setMechanicFilter] = React.useState<string[]>([])
-  const [creatingColumnId, setCreatingColumnId] = React.useState<string | null>(null)
+  // The order that was just dropped into a new column — briefly flashes green.
+  const [justMovedId, setJustMovedId] = React.useState<string | null>(null)
   const [chips, setChips] = React.useState<FilterChip[]>([
     { id: 'archived', label: 'Archived: Not Archived', removable: false },
     { id: 'technicians', label: 'Technicians: All', removable: true },
@@ -87,7 +82,6 @@ export function KanbanBoard() {
   const createStatus = useCreateWorkflowStatus()
   const archiveStatus = useArchiveWorkflowStatus()
   const updateStatus = useUpdateWorkflowStatus()
-  const createOrder = useCreateOrder()
 
   const sensors = useSensors(useSensor(PointerSensor, { activationConstraint: { distance: 6 } }))
 
@@ -131,6 +125,15 @@ export function KanbanBoard() {
     [statusesQuery.data],
   )
 
+  // Unfiltered card count per column (for the "shown/total" header badge when a
+  // filter is active). `filterActive` = any board filter narrowing the cards.
+  const totalByColumn = React.useMemo(() => {
+    const m = new Map<string, number>()
+    for (const o of ordersQuery.data?.items ?? []) m.set(o.workflowStatusId, (m.get(o.workflowStatusId) ?? 0) + 1)
+    return m
+  }, [ordersQuery.data])
+  const filterActive = mechanicFilter.length > 0 || search.trim().length > 0
+
   function addColumn() {
     const name = window.prompt('New column name')?.trim()
     if (!name) return
@@ -143,12 +146,20 @@ export function KanbanBoard() {
     )
   }
 
+  // Open the in-app confirmation Dialog (replaces window.confirm). The actual
+  // archive runs in `confirmArchive` once the user confirms.
   function archiveColumn(id: string, name: string) {
-    if (!window.confirm(`Archive the "${name}" column? Cards stay in the system but the column is hidden.`)) return
+    setPendingArchive({ id, name })
+  }
+
+  function confirmArchive() {
+    if (!pendingArchive) return
+    const { id, name } = pendingArchive
     archiveStatus.mutate(id, {
       onSuccess: () => toast.success('Column archived', `"${name}" is hidden from the board.`),
       onError: (err) => toast.error('Could not archive column', err instanceof Error ? err.message : undefined),
     })
+    setPendingArchive(null)
   }
 
   function renameColumn(id: string, current: string) {
@@ -167,23 +178,10 @@ export function KanbanBoard() {
     setMechanicFilter((cur) => (cur.includes(id) ? cur.filter((m) => m !== id) : [...cur, id]))
   }
 
-  // Create a minimal new Order directly in a column (Jira-style "+ Create").
-  // Reuses the existing create-order path; defaults customer/vehicle to the
-  // first in the directory so the card renders cleanly.
-  function createCardIn(statusId: string, title: string) {
-    const customerId = customersQuery.data?.items[0]?.id ?? ''
-    const vehicleId = vehiclesQuery.data?.[0]?.id ?? ''
-    setCreatingColumnId(statusId)
-    createOrder.mutate(
-      { customerId, vehicleId, workflowStatusId: statusId, title },
-      {
-        onSuccess: () => toast.success('Job created', `"${title}" added to the board.`),
-        onError: (err) => toast.error('Could not create job', err instanceof Error ? err.message : undefined),
-        onSettled: () => setCreatingColumnId(null),
-      },
-    )
-  }
 
+  // Base per-column grouping. Each column is sorted by the PERSISTED
+  // `boardPosition` so cards stay exactly where they were dropped across
+  // reloads/refetches (falls back to array order when unset).
   const ordersByColumn = React.useMemo(() => {
     const map = new Map<string, Order[]>()
     for (const status of statuses) map.set(status.id, [])
@@ -192,8 +190,29 @@ export function KanbanBoard() {
       if (bucket) bucket.push(order)
       else map.set(order.workflowStatusId, [order])
     }
+    for (const [, bucket] of map) {
+      bucket.sort((a, b) => (a.boardPosition ?? 0) - (b.boardPosition ?? 0))
+    }
     return map
   }, [statuses, filteredOrders])
+
+  // Lookups used by the drag math: the set of column ids and a card→column index
+  // so a drop over a card resolves to that card's column.
+  const columnIds = React.useMemo(() => new Set(statuses.map((s) => s.id)), [statuses])
+  const cardColumn = React.useMemo(() => {
+    const m = new Map<string, string>()
+    for (const [col, list] of ordersByColumn) for (const o of list) m.set(o.id, col)
+    return m
+  }, [ordersByColumn])
+
+  // Resolve which column a drag currently points at (the droppable column id, or
+  // the column of the card being hovered). Cards move only BETWEEN columns and
+  // always land at the TOP, so there is no insertion index to compute.
+  function columnOf(id: string | null | undefined): string | null {
+    if (id == null) return null
+    if (columnIds.has(id)) return id
+    return cardColumn.get(id) ?? null
+  }
 
   function openOrder(id: string) {
     setSelectedOrderId(id)
@@ -216,19 +235,33 @@ export function KanbanBoard() {
   }
 
   function handleDragOver(event: DragOverEvent) {
-    // `over.id` is the droppable column id (see Column's useDroppable).
-    setOverColumnId((event.over?.id as string | undefined) ?? null)
+    setOverColumnId(columnOf(event.over ? String(event.over.id) : null))
   }
 
   function handleDragEnd(event: DragEndEvent) {
+    const order = activeOrder
+    const targetColumn = columnOf(event.over ? String(event.over.id) : null)
     setActiveOrder(null)
     setOverColumnId(null)
-    const { active, over } = event
-    if (!over) return
-    const order = active.data.current?.order as Order | undefined
-    const targetStatusId = over.id as string
-    if (!order || order.workflowStatusId === targetStatusId) return
-    moveCard.mutate({ orderId: order.id, workflowStatusId: targetStatusId })
+    if (!order || !targetColumn) return
+    // Same-column drop is not a valid move — no mutation, no flash.
+    if (targetColumn === order.workflowStatusId) return
+    // Valid cross-column move: insert at the TOP (index 0) of the target column.
+    moveCard.mutate({ orderId: order.id, workflowStatusId: targetColumn, index: 0 })
+    // Flash the card green in its new spot to confirm the move landed. We do NOT
+    // clear it on a fixed timer (that used to race the optimistic update +
+    // onSettled refetch, cutting the CSS animation short or missing it). Instead
+    // the flashed card is remounted (via a flash-suffixed key in Column) so the
+    // animation always replays from the start when it lands, and the card itself
+    // clears `justMovedId` on `onAnimationEnd` — the animation owns its lifetime.
+    setJustMovedId(order.id)
+  }
+
+  // Clear the green flash once the card's animation actually finishes (fired from
+  // OrderCard's onAnimationEnd). Guarded so a stale/superseded id can't wipe a
+  // newer flash.
+  function handleFlashEnd(orderId: string) {
+    setJustMovedId((cur) => (cur === orderId ? null : cur))
   }
 
   function handleDragCancel() {
@@ -237,7 +270,8 @@ export function KanbanBoard() {
   }
 
   const loading = statusesQuery.isLoading || ordersQuery.isLoading
-  const density = view === 'condensed' ? 'condensed' : 'standard'
+  // Condensed view was removed; the board always renders at standard density.
+  const density = 'standard' as const
 
   if (statusesQuery.isError || ordersQuery.isError) {
     return (
@@ -257,7 +291,6 @@ export function KanbanBoard() {
           <div className="flex items-center gap-1 rounded-lg border border-border bg-card p-0.5">
             <ViewToggle icon={List} label="List view" active={view === 'list'} onClick={() => setView('list')} />
             <ViewToggle icon={LayoutGrid} label="Board view" active={view === 'board'} onClick={() => setView('board')} />
-            <ViewToggle icon={Rows3} label="Condensed view" active={view === 'condensed'} onClick={() => setView('condensed')} />
           </div>
           <Button
             variant={view === 'parts' ? 'secondary' : 'outline'}
@@ -266,18 +299,6 @@ export function KanbanBoard() {
           >
             <Wrench className="h-4 w-4" /> Parts
           </Button>
-        </div>
-
-        <div className="flex items-center gap-2">
-          <Button size="sm" onClick={() => setParams((p) => { const n = new URLSearchParams(p); n.set('new', 'estimate'); return n }, { replace: true })}>
-            <Plus className="h-4 w-4" /> New Job
-          </Button>
-          <button
-            aria-label="More actions"
-            className="flex h-8 w-8 items-center justify-center rounded-md border border-border bg-card text-muted-foreground hover:bg-muted"
-          >
-            <MoreHorizontal className="h-4 w-4" />
-          </button>
         </div>
       </div>
 
@@ -303,6 +324,13 @@ export function KanbanBoard() {
             </button>
           )}
         </div>
+
+        {/* Thin divider, then the "+ New Job" button (opens the create-job modal). */}
+        <span className="mx-1 h-5 w-px bg-border" aria-hidden="true" />
+        <Button size="sm" onClick={() => setNewJobOpen(true)}>
+          <Plus className="h-4 w-4" /> New Job
+        </Button>
+        <span className="mx-1 h-5 w-px bg-border" aria-hidden="true" />
 
         {/* Overlapping (Jira-style) mechanic-avatar cluster — click an avatar to
             toggle it in the board filter; overflow collapses into a "+N" chip
@@ -341,7 +369,7 @@ export function KanbanBoard() {
       </div>
 
       {/* --- Content --- */}
-      <div className="mt-4 min-h-0 flex-1">
+      <div className="mt-4 min-h-0 flex-1 overflow-auto">
         {view === 'list' ? (
           <div className="h-full overflow-y-auto">
             <DataTable
@@ -388,16 +416,16 @@ export function KanbanBoard() {
         ) : (
           <DndContext
             sensors={sensors}
+            collisionDetection={closestCorners}
             onDragStart={handleDragStart}
             onDragOver={handleDragOver}
             onDragEnd={handleDragEnd}
             onDragCancel={handleDragCancel}
           >
-            {/* `items-start` so short columns fit their content instead of
-                stretching to match tall ones; `h-full` constrains tall columns
-                to the board height so they cap + scroll internally (no page
-                scroll). */}
-            <div className="flex h-full items-start gap-3 overflow-x-auto">
+            {/* `items-stretch` (default) makes every column equal-height — they
+                all stretch down to match the TALLEST column's content. The board
+                area scrolls (on the wrapper) when content exceeds the viewport. */}
+            <div className="flex items-stretch gap-3">
               {statuses.map((status) => (
                 <Column
                   key={status.id}
@@ -412,8 +440,10 @@ export function KanbanBoard() {
                   isOverColumn={overColumnId === status.id}
                   onArchive={() => archiveColumn(status.id, status.name)}
                   onRename={() => renameColumn(status.id, status.name)}
-                  onCreateCard={(title) => createCardIn(status.id, title)}
-                  creating={creatingColumnId === status.id}
+                  totalCount={totalByColumn.get(status.id) ?? 0}
+                  filterActive={filterActive}
+                  justMovedId={justMovedId}
+                  onFlashEnd={handleFlashEnd}
                 />
               ))}
               {/* + Add column affordance — hidden for now (kept for later). */}
@@ -424,7 +454,7 @@ export function KanbanBoard() {
                 <Plus className="h-4 w-4" /> Add column
               </button>
             </div>
-            <DragOverlay dropAnimation={DROP_ANIMATION}>
+            <DragOverlay dropAnimation={null}>
               {activeOrder && (
                 <div className="rotate-2 scale-[1.03] cursor-grabbing shadow-pop">
                   <OrderCard
@@ -443,6 +473,36 @@ export function KanbanBoard() {
       </div>
 
       {selectedOrderId && <OrderDetailDrawer orderId={selectedOrderId} onClose={closeOrder} />}
+
+      {/* Create-job modal (opened from the "+ New Job" toolbar button). Cards land
+          at the top of the chosen column. */}
+      <NewJobModal open={newJobOpen} onOpenChange={setNewJobOpen} columns={statuses} />
+
+
+      {/* Archive-column confirmation (replaces window.confirm). */}
+      <Dialog open={!!pendingArchive} onOpenChange={(open) => !open && setPendingArchive(null)}>
+        <DialogContent size="sm">
+          <DialogHeader>
+            <DialogTitle>Archive column?</DialogTitle>
+          </DialogHeader>
+          <DialogBody className="text-sm text-muted-foreground">
+            {pendingArchive && (
+              <p>
+                The <span className="font-medium text-foreground">"{pendingArchive.name}"</span> column will be hidden
+                from the board. Its cards stay in the system and aren't deleted — you can restore the column later.
+              </p>
+            )}
+          </DialogBody>
+          <DialogFooter>
+            <Button variant="outline" size="sm" onClick={() => setPendingArchive(null)}>
+              Cancel
+            </Button>
+            <Button variant="destructive" size="sm" onClick={confirmArchive} loading={archiveStatus.isPending}>
+              Archive column
+            </Button>
+          </DialogFooter>
+        </DialogContent>
+      </Dialog>
     </div>
   )
 }

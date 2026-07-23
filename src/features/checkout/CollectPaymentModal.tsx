@@ -1,5 +1,5 @@
 import * as React from 'react'
-import { X } from 'lucide-react'
+import { X, Wallet } from 'lucide-react'
 import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogBody, DialogFooter, DialogClose } from '@/components/ui/Dialog'
 import { Button } from '@/components/ui/Button'
 import { Input } from '@/components/ui/Input'
@@ -30,6 +30,7 @@ const METHOD_LABEL: Record<PaymentMethod, string> = {
   check: 'Check',
   card_present: 'Debit',
   card_online: 'Credit',
+  apple_pay: 'Apple Pay',
   ach: 'ACH',
   bnpl: 'BNPL',
   other: 'Other',
@@ -144,6 +145,10 @@ export function CollectPaymentModal({ open, onOpenChange, orderId, balanceDue, i
                 <TabsTrigger value="check">Check</TabsTrigger>
                 <TabsTrigger value="card_present">Debit</TabsTrigger>
                 <TabsTrigger value="card_online">Credit</TabsTrigger>
+                <TabsTrigger value="apple_pay">
+                  <Wallet className="h-3.5 w-3.5" />
+                  Apple Pay
+                </TabsTrigger>
                 <TabsTrigger value="ach">ACH</TabsTrigger>
                 <TabsTrigger value="bnpl">BNPL</TabsTrigger>
                 <TabsTrigger value="other">Other</TabsTrigger>
@@ -214,6 +219,20 @@ export function CollectPaymentModal({ open, onOpenChange, orderId, balanceDue, i
                     Payment link: <span className="font-mono">{lastPaymentUrl}</span>
                   </p>
                 )}
+              </TabsContent>
+
+              <TabsContent value="apple_pay" className="space-y-3">
+                <Field label="Amount">
+                  <Input type="number" value={amount} onChange={(e) => setAmount(e.target.value)} />
+                </Field>
+                <p className="flex items-center gap-1.5 text-xs text-muted-foreground">
+                  <Wallet className="h-3.5 w-3.5" />
+                  Processed as an online wallet card payment. Card data never touches our servers.
+                </p>
+                <Button onClick={() => submitTender('apple_pay')} loading={collectPayment.isPending}>
+                  <Wallet className="h-4 w-4" />
+                  Pay with Apple Pay
+                </Button>
               </TabsContent>
 
               <TabsContent value="ach" className="space-y-3">

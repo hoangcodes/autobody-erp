@@ -15,6 +15,7 @@ const METHOD_LABEL: Record<string, string> = {
   check: 'Check',
   card_present: 'Debit card',
   card_online: 'Credit card',
+  apple_pay: 'Apple Pay',
   ach: 'ACH',
   bnpl: 'BNPL',
   other: 'Other',

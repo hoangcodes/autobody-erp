@@ -225,6 +225,17 @@ export interface VehiclePhoto {
   sortOrder: number
 }
 
+/** A file attached to an order (Jira-style). Uploaded client-side via FileReader,
+ * with `url` holding a data URL so images can be previewed inline. Future home: a
+ * `media` / `order_attachments` table keyed by `orderId` (id, name, mime, url/key, size). */
+export interface OrderAttachment {
+  id: string
+  name: string
+  type: string
+  url: string
+  size?: number
+}
+
 export interface Order {
   id: string
   number: number
@@ -241,6 +252,11 @@ export interface Order {
   invoicedAt?: string
   fullyPaidAt?: string
   lastActivityAt?: string
+  /** When the order was first created. Set at seed/create time; never bumped. */
+  createdAt?: string
+  /** Last time the order (or any of its services/line items) was modified. Bumped
+   * on every mutating PATCH/POST via the mock `touch()`. */
+  updatedAt?: string
   services?: Service[]
   // client-only convenience fields the board may hydrate for display
   customer?: Customer
@@ -261,6 +277,8 @@ export interface Order {
   /** Vehicle photos (display/demo). Lowest sortOrder is the card thumbnail.
    * Future home: a `vehicle_photos` table keyed by `vehicleId`. */
   photos?: VehiclePhoto[]
+  /** Files attached to the order (Jira-style). Uploaded client-side as data URLs. */
+  attachments?: OrderAttachment[]
   /** Denormalized display name of the lead technician (derived from line-item
    * `assignedTechnicianId` → user on the backend). */
   technicianName?: string
@@ -272,6 +290,11 @@ export interface Order {
    * order-detail "Mechanics" section. Future home: an order↔technician
    * assignment join (`order_assignments`). */
   mechanicIds?: string[]
+  /** Ordering rank WITHIN its workflow column (kanban board). Lower sorts first.
+   * Only meaningful relative to other orders in the same column. Set by the
+   * drag-and-drop reorder endpoint (`PATCH /orders/:id/move`). Future home: a
+   * `board_position` column (or a positional join) per workflow status. */
+  boardPosition?: number
 }
 
 export interface Authorization {
@@ -375,6 +398,7 @@ export type PaymentMethod =
   | 'check'
   | 'card_present'
   | 'card_online'
+  | 'apple_pay'
   | 'ach'
   | 'bnpl'
   | 'other'

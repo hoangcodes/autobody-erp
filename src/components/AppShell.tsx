@@ -22,8 +22,6 @@ import {
   MapPin,
   ShieldCheck,
   Check,
-  ImagePlus,
-  Trash2,
   type LucideIcon,
 } from 'lucide-react'
 import { useAuth } from '@/hooks/useAuth'
@@ -39,6 +37,7 @@ import { ChatsDropdown } from '@/features/messaging/ChatsDropdown'
 import { NotificationsDropdown } from '@/features/notifications/NotificationsDropdown'
 import { Avatar } from '@/components/ui/Avatar'
 import { BrandLogo } from '@/components/BrandLogo'
+import { UserSettingsModal } from '@/components/UserSettingsModal'
 import { cn } from '@/lib/utils'
 
 // NetSuite-style account identifier for the (fake) tenant company. Numeric and
@@ -78,8 +77,8 @@ export function AppShell() {
   const [collapsed, setCollapsed] = React.useState(false)
   const [addOpen, setAddOpen] = React.useState(false)
   const [userMenuOpen, setUserMenuOpen] = React.useState(false)
+  const [userSettingsOpen, setUserSettingsOpen] = React.useState(false)
   const [search, setSearch] = React.useState('')
-  const photoInputRef = React.useRef<HTMLInputElement>(null)
   const navigate = useNavigate()
 
   const { data: me } = useAuth()
@@ -96,22 +95,8 @@ export function AppShell() {
   const toggleNotifications = useChatDock((s) => s.toggleNotifications)
   const notificationsOpen = useChatDock((s) => s.notificationsOpen)
   const profilePhotos = useProfilePhotos((s) => s.photos)
-  const setPhoto = useProfilePhotos((s) => s.setPhoto)
-  const removePhoto = useProfilePhotos((s) => s.removePhoto)
 
   const myPhoto = me ? profilePhotos[me.user.id] : undefined
-
-  function handlePhotoChange(e: React.ChangeEvent<HTMLInputElement>) {
-    const file = e.target.files?.[0]
-    // Reset the input so re-selecting the same file fires onChange again.
-    e.target.value = ''
-    if (!file || !me) return
-    const reader = new FileReader()
-    reader.onload = () => {
-      if (typeof reader.result === 'string') setPhoto(me.user.id, reader.result)
-    }
-    reader.readAsDataURL(file)
-  }
 
   const unreadTotal = (conversations ?? []).reduce((sum, c) => sum + c.unreadCount, 0)
   const notifUnread = (notifications ?? []).filter((n) => !n.read).length
@@ -233,14 +218,14 @@ export function AppShell() {
             <BrandLogo />
             <div className="hidden h-8 w-px bg-border md:block" />
             <div className="hidden min-w-0 flex-col leading-tight md:flex">
-              <span className="truncate text-sm font-bold text-foreground">
+              <span className="truncate text-base font-bold text-foreground">
                 {activeLocation?.name ?? 'ABS Autobody'}
               </span>
               <div className="flex items-center gap-1.5">
-                <span className="whitespace-nowrap text-[11px] text-muted-foreground">
+                <span className="whitespace-nowrap text-xs text-muted-foreground">
                   Account ID: {ACCOUNT_ID}
                 </span>
-                <span className="rounded-full bg-success/15 px-1.5 py-[1px] text-[9px] font-bold uppercase tracking-wide text-success">
+                <span className="rounded-full bg-success/15 px-1.5 py-[1px] text-[10px] font-bold uppercase tracking-wide text-success">
                   Production
                 </span>
               </div>
@@ -373,33 +358,6 @@ export function AppShell() {
                     </div>
                   </div>
 
-                  {/* Profile photo: upload (data-URL, persisted locally) or remove. */}
-                  <div className="border-t border-border pt-1">
-                    <input
-                      ref={photoInputRef}
-                      type="file"
-                      accept="image/*"
-                      className="hidden"
-                      onChange={handlePhotoChange}
-                    />
-                    <button
-                      onClick={() => photoInputRef.current?.click()}
-                      className="flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-left hover:bg-muted"
-                    >
-                      <ImagePlus className="h-3.5 w-3.5 text-muted-foreground" />
-                      {myPhoto ? 'Change photo' : 'Upload photo'}
-                    </button>
-                    {myPhoto && (
-                      <button
-                        onClick={() => me && removePhoto(me.user.id)}
-                        className="flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-left text-destructive hover:bg-muted"
-                      >
-                        <Trash2 className="h-3.5 w-3.5" />
-                        Remove photo
-                      </button>
-                    )}
-                  </div>
-
                   <div className="border-t border-border pt-2">
                     <p className="flex items-center gap-1.5 px-2 pb-1 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
                       <ShieldCheck className="h-3.5 w-3.5" /> Role
@@ -445,13 +403,15 @@ export function AppShell() {
                   )}
 
                   <div className="border-t border-border pt-1">
-                    <NavLink
-                      to="/settings"
-                      onClick={() => setUserMenuOpen(false)}
-                      className="block rounded-sm px-2 py-1.5 hover:bg-muted"
+                    <button
+                      onClick={() => {
+                        setUserMenuOpen(false)
+                        setUserSettingsOpen(true)
+                      }}
+                      className="block w-full rounded-sm px-2 py-1.5 text-left hover:bg-muted"
                     >
-                      User Preferences
-                    </NavLink>
+                      User Settings
+                    </button>
                   </div>
                 </div>
               )}
@@ -466,6 +426,9 @@ export function AppShell() {
 
       {/* Global Facebook-style messaging dock (launcher + chats + docked windows) */}
       <ChatDock />
+
+      {/* User Settings modal (profile photo lives here now, not in the dropdown) */}
+      <UserSettingsModal open={userSettingsOpen} onOpenChange={setUserSettingsOpen} />
     </div>
   )
 }

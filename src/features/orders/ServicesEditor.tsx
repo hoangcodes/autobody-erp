@@ -1,12 +1,22 @@
 import * as React from 'react'
-import { ChevronDown, X } from 'lucide-react'
-import type { Customer, MessageChannel, Order, OrderLabel, OrderLabelColor, Vehicle } from '@/types'
+import { ChevronDown, FileText, Paperclip, X } from 'lucide-react'
+import type { MessageChannel, Order, OrderAttachment, Vehicle } from '@/types'
 import { Button } from '@/components/ui/Button'
+import { Badge } from '@/components/ui/Badge'
 import { Card } from '@/components/ui/Card'
+import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogClose } from '@/components/ui/Dialog'
 import { EmptyState } from '@/components/ui/EmptyState'
-import { MechanicAvatar } from '@/components/MechanicAvatar'
 import { CarBrandMark } from '@/components/CarBrandMark'
-import { MultiCombobox, useOutsideClose, type ComboOption } from '@/components/ui/MultiCombobox'
+import {
+  FieldRow,
+  LevelSelect,
+  SingleCombobox,
+  AssigneeInput,
+  CustomerInput,
+  LabelsInput,
+  COLOR_PRESETS,
+  uniqStrings,
+} from '@/features/orders/detailFields'
 import { ServiceAccordionItem } from '@/features/orders/ServiceAccordionItem'
 import { VehiclePhotoCarousel } from '@/features/workflow/VehiclePhotoCarousel'
 import { TotalsRail } from '@/features/orders/TotalsRail'
@@ -14,59 +24,21 @@ import { SendOrderDialog } from '@/features/orders/SendOrderDialog'
 import { CollectPaymentModal } from '@/features/checkout/CollectPaymentModal'
 import { useCustomerDirectory } from '@/hooks/useCustomers'
 import { useVehicleDirectory, useUpdateVehicle } from '@/hooks/useVehicles'
-import { useUsers } from '@/hooks/useUsers'
 import {
   useCreateService,
-  useUpdateService,
   useDeleteService,
   useCreateLineItem,
   useUpdateLineItem,
   useDeleteLineItem,
-  useConvertOrder,
   useUpdateOrder,
 } from '@/hooks/useOrders'
 import { toast } from '@/components/ui/toastStore'
-import { cn, customerDisplayName, formatMoney, uuid, vehicleColorFirst } from '@/lib/utils'
-
-/** Tailwind classes per label color — shared by the chips and the label combobox. */
-const LABEL_CLASSES: Record<OrderLabelColor, string> = {
-  purple: 'bg-purple-100 text-purple-700 dark:bg-purple-500/20 dark:text-purple-300',
-  red: 'bg-red-100 text-red-700 dark:bg-red-500/20 dark:text-red-300',
-  green: 'bg-green-100 text-green-700 dark:bg-green-500/20 dark:text-green-300',
-  blue: 'bg-blue-100 text-blue-700 dark:bg-blue-500/20 dark:text-blue-300',
-  orange: 'bg-orange-100 text-orange-700 dark:bg-orange-500/20 dark:text-orange-300',
-  gray: 'bg-slate-100 text-slate-600 dark:bg-slate-500/20 dark:text-slate-300',
-}
-
-/** Small solid dot per label color — used as the option `leading` in the combobox. */
-const LABEL_DOT: Record<OrderLabelColor, string> = {
-  purple: 'bg-purple-500',
-  red: 'bg-red-500',
-  green: 'bg-green-500',
-  blue: 'bg-blue-500',
-  orange: 'bg-orange-500',
-  gray: 'bg-slate-400',
-}
-
-/** Lightweight preset palette for the "Labels" combobox. Picking one appends it
- * to the order (via PATCH /orders/:id) so it then shows on the board card. */
-const PRESET_LABELS: { text: string; color: OrderLabelColor }[] = [
-  { text: 'VIP', color: 'purple' },
-  { text: 'Rush', color: 'red' },
-  { text: 'Waiting on parts', color: 'orange' },
-  { text: 'Approved', color: 'green' },
-  { text: 'Insurance', color: 'blue' },
-  { text: 'Follow up', color: 'gray' },
-]
-
-/** Common paint colors offered in the Color combobox (users can still add new). */
-const COLOR_PRESETS = [
-  'Black', 'White', 'Silver', 'Gray', 'Red', 'Blue', 'Green', 'Gold', 'Beige', 'Brown', 'Orange', 'Yellow',
-]
+import { cn, customerDisplayName, formatDateTime, formatMoney, uuid, vehicleColorFirst } from '@/lib/utils'
 
 export function ServicesEditor({ order }: { order: Order }) {
   const [sendOpen, setSendOpen] = React.useState(false)
   const [payOpen, setPayOpen] = React.useState(false)
+  const [previewOpen, setPreviewOpen] = React.useState(false)
   const [sendChannel, setSendChannel] = React.useState<MessageChannel>('sms')
 
   function openSend(channel: MessageChannel) {
@@ -75,14 +47,14 @@ export function ServicesEditor({ order }: { order: Order }) {
   }
 
   const createService = useCreateService(order.id)
-  const updateService = useUpdateService(order.id)
   const deleteService = useDeleteService(order.id)
   const createLineItem = useCreateLineItem(order.id)
   const updateLineItem = useUpdateLineItem(order.id)
   const deleteLineItem = useDeleteLineItem(order.id)
-  const convertOrder = useConvertOrder(order.id)
 
-  const nextConversion = order.status === 'estimate' ? 'repair_order' : order.status === 'repair_order' ? 'invoice' : null
+  // Fully paid: no balance remaining AND the invoice actually has a total (so a
+  // brand-new $0 order doesn't show "Paid"). Drives the green Invoice badge.
+  const isPaid = order.balanceDue <= 0 && order.totals.total > 0
 
   function handleAddService() {
     createService.mutate(
@@ -94,9 +66,19 @@ export function ServicesEditor({ order }: { order: Order }) {
   }
 
   return (
-    <div className="grid grid-cols-1 gap-4 lg:grid-cols-[1fr_280px_240px]">
-      {/* COL 1 (MAIN) — Services (top) → Description → Photos (bottom). */}
+    <div className="grid grid-cols-1 gap-4 lg:grid-cols-[1fr_260px_220px]">
+      {/* COL 1 (MAIN) — Key Details (Description) → Attachments → Services → Photos. */}
       <div className="min-w-0 space-y-4">
+        {/* Key Details — a lightweight collapsible group (NO Card/Section chrome).
+         * Collapses ONLY its own content (the Description). Attachments is a
+         * separate, sibling collapsible below (not a child), so collapsing Key
+         * Details never hides Attachments. */}
+        <Collapsible title="Key Details" headingClassName="text-base">
+          <DescriptionBlock order={order} />
+        </Collapsible>
+
+        <AttachmentsBlock order={order} />
+
         <Section
           title="Services"
           right={
@@ -113,7 +95,6 @@ export function ServicesEditor({ order }: { order: Order }) {
                 <ServiceAccordionItem
                   key={service.id}
                   service={service}
-                  onUpdateService={(body) => updateService.mutate({ serviceId: service.id, body })}
                   onDeleteService={() => deleteService.mutate(service.id)}
                   onAddLineItem={(body) => createLineItem.mutate({ serviceId: service.id, body })}
                   onUpdateLineItem={(itemId, body) => updateLineItem.mutate({ itemId, body })}
@@ -123,8 +104,6 @@ export function ServicesEditor({ order }: { order: Order }) {
             </div>
           )}
         </Section>
-
-        <DescriptionBlock order={order} />
 
         <Section title="Photos">
           <VehiclePhotoCarousel orderId={order.id} vehicleId={order.vehicleId} photos={order.photos ?? []} />
@@ -140,36 +119,52 @@ export function ServicesEditor({ order }: { order: Order }) {
 
       {/* COL 3 — "Invoice" (totals + actions). */}
       <div>
-        <Section title="Invoice">
+        <Section
+          title="Invoice"
+          right={
+            isPaid ? (
+              <Badge variant="success">Paid</Badge>
+            ) : undefined
+          }
+        >
           <div className="space-y-3">
             <TotalsRail totals={order.totals} bare />
             <div className="flex flex-col gap-2 border-t border-border pt-3">
-              <Button onClick={() => openSend('sms')}>Send</Button>
-              {nextConversion && (
-                <Button
-                  variant="secondary"
-                  loading={convertOrder.isPending}
-                  onClick={() =>
-                    convertOrder.mutate(nextConversion, {
-                      onSuccess: () => toast.success('Order converted', `Now a ${nextConversion.replace('_', ' ')}`),
-                      onError: (err) => toast.error('Could not convert', err instanceof Error ? err.message : undefined),
-                    })
-                  }
-                >
-                  Convert to {nextConversion === 'repair_order' ? 'Repair Order' : 'Invoice'}
-                </Button>
-              )}
-              <Button variant="outline" onClick={() => setPayOpen(true)}>
-                Collect Payment{order.balanceDue > 0 ? ` (${formatMoney(order.balanceDue)})` : ''}
+              {/* Remaining balance line — the amount now lives here, not on the button. */}
+              <p className="flex items-center justify-between text-sm">
+                <span className="text-muted-foreground">Remaining balance</span>
+                <span className="font-semibold text-foreground">
+                  {order.balanceDue > 0 ? formatMoney(order.balanceDue) : 'Paid in full'}
+                </span>
+              </p>
+              {/* Most prominent CTA: dark-grey Accept Payment with a same-tone
+               * (non-blue) border so it has an edge without a colored outline. */}
+              <Button
+                onClick={() => setPayOpen(true)}
+                className="bg-slate-700 text-white border border-slate-700 hover:bg-slate-600 dark:bg-slate-800 dark:border-slate-700 dark:hover:bg-slate-700"
+              >
+                Accept Payment
               </Button>
-              <Button variant="ghost" onClick={() => window.print()}>
+              {/* Invoice-send actions (primary) — bordered to match the set. */}
+              <Button className="border border-primary-700 dark:border-primary-400" onClick={() => openSend('email')}>
+                Email Invoice
+              </Button>
+              <Button className="border border-primary-700 dark:border-primary-400" onClick={() => openSend('sms')}>
+                SMS Invoice
+              </Button>
+              {/* Print — same grey as Preview Print. */}
+              <Button
+                onClick={() => window.print()}
+                className="bg-slate-500 text-white border border-slate-600 hover:bg-slate-600 dark:bg-slate-600 dark:border-slate-500 dark:hover:bg-slate-500"
+              >
                 Print
               </Button>
-              <Button variant="ghost" onClick={() => openSend('email')}>
-                Email to customer
-              </Button>
-              <Button variant="ghost" onClick={() => openSend('sms')}>
-                SMS to customer
+              {/* Preview Print — same grey; opens a read-only invoice preview. */}
+              <Button
+                onClick={() => setPreviewOpen(true)}
+                className="bg-slate-500 text-white border border-slate-600 hover:bg-slate-600 dark:bg-slate-600 dark:border-slate-500 dark:hover:bg-slate-500"
+              >
+                Preview Print
               </Button>
             </div>
           </div>
@@ -186,7 +181,183 @@ export function ServicesEditor({ order }: { order: Order }) {
         defaultChannel={sendChannel}
       />
       <CollectPaymentModal open={payOpen} onOpenChange={setPayOpen} orderId={order.id} balanceDue={order.balanceDue} />
+      <InvoicePreviewDialog open={previewOpen} onOpenChange={setPreviewOpen} order={order} />
     </div>
+  )
+}
+
+// ---------------------------------------------------------------------------
+// Left-chevron collapsible — a lightweight header (chevron LEFT of the title)
+// that toggles its body. Used for the "Key Details" group and its Description /
+// Attachments children. Deliberately NOT the Card `Section` chrome. An optional
+// `right` slot sits opposite the title (e.g. Attachments' "Attach files").
+// ---------------------------------------------------------------------------
+function Collapsible({
+  title,
+  right,
+  defaultOpen = true,
+  headingClassName,
+  children,
+}: {
+  title: string
+  right?: React.ReactNode
+  defaultOpen?: boolean
+  headingClassName?: string
+  children: React.ReactNode
+}) {
+  const [open, setOpen] = React.useState(defaultOpen)
+  return (
+    <div>
+      <div className="flex items-center justify-between gap-2">
+        <button
+          type="button"
+          onClick={() => setOpen((o) => !o)}
+          aria-expanded={open}
+          className="flex min-w-0 flex-1 items-center gap-1.5 text-left"
+        >
+          <ChevronDown
+            className={cn('h-4 w-4 shrink-0 text-muted-foreground transition-transform', !open && '-rotate-90')}
+            aria-hidden="true"
+          />
+          <h3 className={cn('truncate text-sm font-semibold text-foreground', headingClassName)}>{title}</h3>
+        </button>
+        {right}
+      </div>
+      {open && <div className="pt-2">{children}</div>}
+    </div>
+  )
+}
+
+/** Read-only invoice preview (reuses the Dialog + the attachments preview
+ * pattern). Renders a clean invoice: shop/brand header, customer + vehicle, the
+ * services/line items (quantity/price/amount), and the totals. */
+function InvoicePreviewDialog({
+  open,
+  onOpenChange,
+  order,
+}: {
+  open: boolean
+  onOpenChange: (open: boolean) => void
+  order: Order
+}) {
+  const customersQuery = useCustomerDirectory()
+  const directory = useVehicleDirectory()
+  const customer = (customersQuery.data?.items ?? []).find((c) => c.id === order.customerId)
+  const vehicle = (directory.data ?? []).find((v) => v.id === order.vehicleId)
+
+  const rows: { name: string; qty: number; price: number; amount: number }[] = []
+  for (const svc of order.services ?? []) {
+    for (const li of svc.lineItems ?? []) {
+      const qty = li.quantity ?? 1
+      const eff = li.type === 'labor' ? (li.hours ?? 0) * qty : qty
+      const raw = eff * (li.unitRetail ?? 0)
+      rows.push({
+        name: li.name || (li.type === 'discount' ? 'Discount' : 'Item'),
+        qty: eff,
+        price: li.unitRetail ?? 0,
+        amount: li.type === 'discount' ? -raw : raw,
+      })
+    }
+  }
+
+  const t = order.totals
+
+  return (
+    <Dialog open={open} onOpenChange={onOpenChange}>
+      <DialogContent size="lg">
+        <DialogHeader>
+          <DialogTitle>Invoice preview</DialogTitle>
+          <DialogClose asChild>
+            <Button variant="ghost" size="icon" aria-label="Close">
+              <X className="h-4 w-4" />
+            </Button>
+          </DialogClose>
+        </DialogHeader>
+        <div className="max-h-[75vh] overflow-y-auto p-6 scrollbar-thin">
+          {/* Shop / brand header */}
+          <div className="flex items-start justify-between gap-4 border-b border-border pb-4">
+            <div>
+              <p className="text-lg font-bold text-foreground">ABS Autobody</p>
+              <p className="text-xs text-muted-foreground">128 Market St, Denver, CO</p>
+            </div>
+            <div className="text-right">
+              <p className="text-sm font-semibold text-foreground">Invoice #{order.number}</p>
+              <p className="text-xs text-muted-foreground">{formatDateTime(order.invoicedAt ?? order.createdAt)}</p>
+            </div>
+          </div>
+
+          {/* Customer + vehicle */}
+          <div className="grid grid-cols-2 gap-4 border-b border-border py-4 text-sm">
+            <div>
+              <p className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">Bill to</p>
+              <p className="font-medium text-foreground">{customerDisplayName(customer)}</p>
+            </div>
+            <div>
+              <p className="text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">Vehicle</p>
+              <p className="font-medium text-foreground">{vehicleColorFirst(vehicle)}</p>
+            </div>
+          </div>
+
+          {/* Line items */}
+          <table className="mt-4 w-full text-sm tabular-nums">
+            <thead>
+              <tr className="border-b border-border text-[11px] uppercase tracking-wide text-muted-foreground">
+                <th className="py-2 text-left font-semibold">Item</th>
+                <th className="py-2 text-right font-semibold">Qty</th>
+                <th className="py-2 text-right font-semibold">Price</th>
+                <th className="py-2 text-right font-semibold">Amount</th>
+              </tr>
+            </thead>
+            <tbody>
+              {rows.length === 0 ? (
+                <tr>
+                  <td colSpan={4} className="py-6 text-center text-muted-foreground">
+                    No line items.
+                  </td>
+                </tr>
+              ) : (
+                rows.map((r, i) => (
+                  <tr key={i} className="border-b border-border/60">
+                    <td className="py-2 pr-2 text-foreground">{r.name}</td>
+                    <td className="py-2 text-right text-muted-foreground">{r.qty}</td>
+                    <td className="py-2 text-right text-muted-foreground">{formatMoney(r.price)}</td>
+                    <td className="py-2 text-right font-medium text-foreground">{formatMoney(r.amount)}</td>
+                  </tr>
+                ))
+              )}
+            </tbody>
+          </table>
+
+          {/* Totals */}
+          <div className="ml-auto mt-4 w-full max-w-xs space-y-1.5 text-sm">
+            <div className="flex justify-between text-muted-foreground">
+              <span>Subtotal</span>
+              <span className="font-medium text-foreground">{formatMoney(t?.subtotal)}</span>
+            </div>
+            {t?.discountTotal ? (
+              <div className="flex justify-between text-muted-foreground">
+                <span>Discounts</span>
+                <span className="font-medium text-foreground">-{formatMoney(t.discountTotal)}</span>
+              </div>
+            ) : null}
+            {t?.feeTotal ? (
+              <div className="flex justify-between text-muted-foreground">
+                <span>Fees</span>
+                <span className="font-medium text-foreground">{formatMoney(t.feeTotal)}</span>
+              </div>
+            ) : null}
+            <div className="flex justify-between text-muted-foreground">
+              <span>Tax</span>
+              <span className="font-medium text-foreground">{formatMoney(t?.taxTotal)}</span>
+            </div>
+            <div className="flex justify-between border-t border-border pt-2 text-base font-semibold text-foreground">
+              <span>Total</span>
+              <span>{formatMoney(t?.total)}</span>
+            </div>
+          </div>
+        </div>
+      </DialogContent>
+    </Dialog>
   )
 }
 
@@ -282,17 +453,17 @@ function DetailsForm({ order }: { order: Order }) {
 
       {/* 2. Assignee — multi-select over team members → order.mechanicIds. */}
       <FieldRow label="Assignee">
-        <AssigneeField order={order} onChange={(ids) => patchOrder({ mechanicIds: ids })} />
+        <AssigneeInput value={order.mechanicIds ?? []} onChange={(ids) => patchOrder({ mechanicIds: ids })} />
       </FieldRow>
 
       {/* 3. Customer — single combobox → order.customerId. */}
       <FieldRow label="Customer">
-        <CustomerField order={order} customers={customers} onChange={(id) => patchOrder({ customerId: id })} />
+        <CustomerInput value={order.customerId} customers={customers} onChange={(id) => patchOrder({ customerId: id })} />
       </FieldRow>
 
       {/* 4. Labels — multi combobox → order.labels. */}
       <FieldRow label="Labels">
-        <LabelsField order={order} onChange={(labels) => patchOrder({ labels })} />
+        <LabelsInput value={order.labels ?? []} onChange={(labels) => patchOrder({ labels })} />
       </FieldRow>
 
       {/* 5. Year (mandatory) → vehicle.year */}
@@ -366,311 +537,18 @@ function DetailsForm({ order }: { order: Order }) {
       <FieldRow label="Effort">
         <LevelSelect value={order.effort ?? 'low'} onChange={(v) => patchOrder({ effort: v })} ariaLabel="Effort" />
       </FieldRow>
+
+      {/* 12. Created — read-only. */}
+      <FieldRow label="Created">
+        <span className="text-foreground">{formatDateTime(order.createdAt)}</span>
+      </FieldRow>
+
+      {/* 13. Updated — read-only (bumped on every edit). */}
+      <FieldRow label="Updated">
+        <span className="text-foreground">{formatDateTime(order.updatedAt)}</span>
+      </FieldRow>
     </div>
   )
-}
-
-/** A single Details-form row: a small uppercase-muted label (with an optional
- * required asterisk) above its control. Shows a red hint when a required field
- * is empty. Rows stack with a divider between them. */
-function FieldRow({
-  label,
-  required = false,
-  invalid = false,
-  hint,
-  children,
-}: {
-  label: string
-  required?: boolean
-  invalid?: boolean
-  hint?: string
-  children: React.ReactNode
-}) {
-  return (
-    <div className="border-t border-border py-2.5 first:border-t-0 first:pt-0">
-      <p className="pb-1 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
-        {label}
-        {required && <span className="text-red-500"> *</span>}
-      </p>
-      {children}
-      {required && invalid && <p className="pt-1 text-[11px] text-red-500">{hint ?? 'Required.'}</p>}
-    </div>
-  )
-}
-
-/** Low / Medium / High native dropdown (Priority + Effort). */
-function LevelSelect({
-  value,
-  onChange,
-  ariaLabel,
-}: {
-  value: 'low' | 'medium' | 'high'
-  onChange: (v: 'low' | 'medium' | 'high') => void
-  ariaLabel: string
-}) {
-  return (
-    <select
-      value={value}
-      onChange={(e) => onChange(e.target.value as 'low' | 'medium' | 'high')}
-      aria-label={ariaLabel}
-      className="h-8 w-full rounded-md border border-input bg-card px-2 text-sm text-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
-    >
-      <option value="low">Low</option>
-      <option value="medium">Medium</option>
-      <option value="high">High</option>
-    </select>
-  )
-}
-
-// ---------------------------------------------------------------------------
-// Inline comboboxes (reusable "text + list" controls)
-// ---------------------------------------------------------------------------
-
-/** Single-select combobox: a text input that filters `options`; picking one sets
- * the value. With `allowNew`, an unmatched query offers a "+ Add …" row that
- * commits the raw text as the value. */
-function SingleCombobox({
-  value,
-  options,
-  onChange,
-  placeholder,
-  allowNew = false,
-  invalid = false,
-  ariaLabel,
-}: {
-  value: string
-  options: ComboOption[]
-  onChange: (value: string) => void
-  placeholder?: string
-  allowNew?: boolean
-  invalid?: boolean
-  ariaLabel?: string
-}) {
-  const [open, setOpen] = React.useState(false)
-  const [query, setQuery] = React.useState('')
-  const ref = React.useRef<HTMLDivElement>(null)
-  useOutsideClose(ref, open, () => setOpen(false))
-
-  const selected = options.find((o) => o.value === value)
-  const selectedLabel = selected?.label ?? value ?? ''
-
-  const q = query.trim().toLowerCase()
-  const filtered = options.filter((o) => o.label.toLowerCase().includes(q))
-  const hasExact = options.some((o) => o.label.toLowerCase() === q)
-  const showCreate = allowNew && q.length > 0 && !hasExact
-
-  function choose(v: string) {
-    onChange(v)
-    setQuery('')
-    setOpen(false)
-  }
-
-  return (
-    <div className="relative" ref={ref}>
-      <div
-        className={cn(
-          'flex h-8 items-center gap-1.5 rounded-md border bg-card px-2',
-          invalid ? 'border-red-400' : 'border-input',
-          open && 'ring-2 ring-ring',
-        )}
-      >
-        {!open && selected?.leading}
-        <input
-          value={open ? query : selectedLabel}
-          onChange={(e) => setQuery(e.target.value)}
-          onFocus={(e) => {
-            setOpen(true)
-            setQuery('')
-            e.currentTarget.select()
-          }}
-          placeholder={placeholder}
-          aria-label={ariaLabel}
-          className="min-w-0 flex-1 bg-transparent text-sm text-foreground placeholder:text-muted-foreground focus:outline-none"
-        />
-        <ChevronDown className="h-3.5 w-3.5 shrink-0 text-muted-foreground" aria-hidden="true" />
-      </div>
-      {open && (
-        <div className="absolute left-0 top-full z-50 mt-1 max-h-56 w-full overflow-auto rounded-md border border-border bg-popover p-1 shadow-pop animate-fade-in">
-          {filtered.map((o) => (
-            <button
-              key={o.value}
-              type="button"
-              onMouseDown={(e) => e.preventDefault()}
-              onClick={() => choose(o.value)}
-              className={cn(
-                'flex w-full items-center gap-2 rounded-sm px-2 py-1.5 text-left text-sm hover:bg-muted',
-                o.value === value && 'font-medium',
-              )}
-            >
-              {o.leading}
-              <span className="truncate">{o.label}</span>
-            </button>
-          ))}
-          {showCreate && (
-            <button
-              type="button"
-              onMouseDown={(e) => e.preventDefault()}
-              onClick={() => choose(query.trim())}
-              className="flex w-full items-center rounded-sm px-2 py-1.5 text-left text-sm font-medium text-primary-700 hover:bg-muted dark:text-primary-300"
-            >
-              + Add “{query.trim()}”
-            </button>
-          )}
-          {filtered.length === 0 && !showCreate && (
-            <p className="px-2 py-1.5 text-xs text-muted-foreground">No matches</p>
-          )}
-        </div>
-      )}
-    </div>
-  )
-}
-
-/** Assignee field — multi combobox over the team roster → order.mechanicIds. */
-function AssigneeField({ order, onChange }: { order: Order; onChange: (ids: string[]) => void }) {
-  const usersQuery = useUsers()
-  const roster = usersQuery.data ?? []
-  const nameById = new Map(roster.map((u) => [u.id, u.name]))
-  const options: ComboOption[] = roster.map((u) => ({
-    value: u.id,
-    label: u.name,
-    leading: <MechanicAvatar id={u.id} name={u.name} size={20} />,
-  }))
-
-  return (
-    <MultiCombobox
-      values={order.mechanicIds ?? []}
-      options={options}
-      onChange={onChange}
-      placeholder="Assign team members"
-      ariaLabel="Assignee"
-      renderChip={(id, remove) => (
-        <span className="inline-flex items-center gap-1 rounded-full bg-muted py-0.5 pl-0.5 pr-1.5 text-[11px] font-medium text-foreground">
-          <MechanicAvatar id={id} name={nameById.get(id)} size={18} />
-          {nameById.get(id) ?? 'Unknown'}
-          <button
-            type="button"
-            onClick={(e) => {
-              e.stopPropagation()
-              remove()
-            }}
-            aria-label="Remove assignee"
-            className="text-muted-foreground hover:text-foreground"
-          >
-            <X className="h-3 w-3" />
-          </button>
-        </span>
-      )}
-    />
-  )
-}
-
-/** Customer field — single combobox (text + list) over customers → order.customerId. */
-function CustomerField({
-  order,
-  customers,
-  onChange,
-}: {
-  order: Order
-  customers: Customer[]
-  onChange: (id: string) => void
-}) {
-  const options: ComboOption[] = customers.map((c) => ({ value: c.id, label: customerDisplayName(c) }))
-  return (
-    <SingleCombobox
-      value={order.customerId}
-      options={options}
-      onChange={onChange}
-      placeholder="Select customer"
-      ariaLabel="Customer"
-    />
-  )
-}
-
-/** Labels field — multi combobox over preset palette + this order's labels.
- * Selecting/removing persists order.labels (each label keeps its color; a
- * newly-typed label defaults to gray). */
-function LabelsField({ order, onChange }: { order: Order; onChange: (labels: OrderLabel[]) => void }) {
-  const labels = order.labels ?? []
-
-  const colorByText = new Map<string, OrderLabelColor>()
-  PRESET_LABELS.forEach((p) => colorByText.set(p.text.toLowerCase(), p.color))
-  labels.forEach((l) => colorByText.set(l.text.toLowerCase(), l.color))
-
-  // Options = preset palette + any existing labels, de-duplicated by text.
-  const seen = new Set<string>()
-  const options: ComboOption[] = []
-  for (const { text } of [...PRESET_LABELS, ...labels]) {
-    const key = text.toLowerCase()
-    if (seen.has(key)) continue
-    seen.add(key)
-    const color = colorByText.get(key) ?? 'gray'
-    options.push({
-      value: text,
-      label: text,
-      leading: <span className={cn('h-2.5 w-2.5 shrink-0 rounded-full', LABEL_DOT[color])} />,
-    })
-  }
-
-  const values = labels.map((l) => l.text)
-
-  function handleChange(texts: string[]) {
-    const next: OrderLabel[] = texts.map((t) => {
-      const existing = labels.find((l) => l.text.toLowerCase() === t.toLowerCase())
-      if (existing) return existing
-      return { id: uuid(), text: t, color: colorByText.get(t.toLowerCase()) ?? 'gray' }
-    })
-    onChange(next)
-  }
-
-  return (
-    <MultiCombobox
-      values={values}
-      options={options}
-      onChange={handleChange}
-      allowNew
-      placeholder="Add label"
-      ariaLabel="Labels"
-      renderChip={(text, remove) => {
-        const color = colorByText.get(text.toLowerCase()) ?? 'gray'
-        return (
-          <span
-            className={cn(
-              'inline-flex items-center gap-1 rounded-full px-2 py-0.5 text-[11px] font-medium leading-none',
-              LABEL_CLASSES[color],
-            )}
-          >
-            {text}
-            <button
-              type="button"
-              onClick={(e) => {
-                e.stopPropagation()
-                remove()
-              }}
-              aria-label={`Remove ${text}`}
-              className="rounded-full hover:opacity-70"
-            >
-              <X className="h-3 w-3" />
-            </button>
-          </span>
-        )
-      }}
-    />
-  )
-}
-
-/** De-duplicate (case-insensitive), drop empties, and sort a list of strings. */
-function uniqStrings(list: (string | undefined)[]): string[] {
-  const seen = new Set<string>()
-  const out: string[] = []
-  for (const item of list) {
-    const v = (item ?? '').trim()
-    if (!v) continue
-    const key = v.toLowerCase()
-    if (seen.has(key)) continue
-    seen.add(key)
-    out.push(v)
-  }
-  return out.sort((a, b) => a.localeCompare(b))
 }
 
 /** Jira-style editable Description block (main column). Shows the description
@@ -691,9 +569,10 @@ function DescriptionBlock({ order }: { order: Order }) {
     }
   }
 
+  // Description is a plain label + inline-editable content (NO collapse chevron).
   return (
     <div>
-      <h3 className="pb-1.5 text-sm font-semibold">Description</h3>
+      <h3 className="pb-2 text-sm font-semibold text-foreground">Description</h3>
       {editing ? (
         <div className="space-y-2">
           <textarea
@@ -738,5 +617,177 @@ function DescriptionBlock({ order }: { order: Order }) {
         </button>
       )}
     </div>
+  )
+}
+
+/** Human-readable file size, e.g. 2048 -> "2 KB". */
+function formatBytes(bytes: number | undefined): string {
+  if (!bytes || bytes <= 0) return ''
+  const units = ['B', 'KB', 'MB', 'GB']
+  const i = Math.min(units.length - 1, Math.floor(Math.log(bytes) / Math.log(1024)))
+  const size = bytes / Math.pow(1024, i)
+  return `${size >= 10 || i === 0 ? Math.round(size) : size.toFixed(1)} ${units[i]}`
+}
+
+/** Jira-style Attachments area (main column, inside the "Key details" group).
+ * "Attach files" opens a hidden multi-file picker; each file is read via
+ * FileReader into a data URL and persisted on the order (PATCH /orders/:id
+ * { attachments }). Images render as thumbnails, others as a file-icon tile.
+ * Clicking a tile opens a preview lightbox; each tile has an (x) to remove. */
+function AttachmentsBlock({ order }: { order: Order }) {
+  const updateOrder = useUpdateOrder(order.id)
+  const inputRef = React.useRef<HTMLInputElement>(null)
+  const [preview, setPreview] = React.useState<OrderAttachment | null>(null)
+  const attachments = order.attachments ?? []
+
+  function persist(next: OrderAttachment[]) {
+    updateOrder.mutate(
+      { attachments: next },
+      { onError: (err) => toast.error('Could not update attachments', err instanceof Error ? err.message : undefined) },
+    )
+  }
+
+  function handleFiles(files: FileList | null) {
+    if (!files || files.length === 0) return
+    const readers = Array.from(files).map(
+      (file) =>
+        new Promise<OrderAttachment>((resolve, reject) => {
+          const reader = new FileReader()
+          reader.onload = () =>
+            resolve({ id: uuid(), name: file.name, type: file.type, url: String(reader.result), size: file.size })
+          reader.onerror = () => reject(reader.error)
+          reader.readAsDataURL(file)
+        }),
+    )
+    Promise.all(readers)
+      .then((added) => persist([...attachments, ...added]))
+      .catch(() => toast.error('Could not read file'))
+  }
+
+  function remove(id: string) {
+    persist(attachments.filter((a) => a.id !== id))
+  }
+
+  return (
+    <Collapsible
+      title="Attachments"
+      right={
+        <Button size="sm" variant="outline" onClick={() => inputRef.current?.click()} loading={updateOrder.isPending}>
+          <Paperclip className="h-3.5 w-3.5" aria-hidden="true" /> Attach files
+        </Button>
+      }
+    >
+      <input
+        ref={inputRef}
+        type="file"
+        multiple
+        className="hidden"
+        onChange={(e) => {
+          handleFiles(e.target.files)
+          e.target.value = ''
+        }}
+      />
+      {attachments.length === 0 ? (
+        <p className="px-0.5 text-sm text-muted-foreground">No attachments yet.</p>
+      ) : (
+        <div className="grid grid-cols-[repeat(auto-fill,minmax(120px,1fr))] gap-2">
+          {attachments.map((att) => {
+            const isImage = att.type.startsWith('image/')
+            return (
+              <div
+                key={att.id}
+                className="group relative overflow-hidden rounded-md border border-border bg-card"
+              >
+                <button
+                  type="button"
+                  onClick={() => setPreview(att)}
+                  title={att.name}
+                  className="block w-full text-left"
+                >
+                  {isImage ? (
+                    <img src={att.url} alt={att.name} className="h-20 w-full object-cover" />
+                  ) : (
+                    <div className="flex h-20 items-center justify-center bg-muted">
+                      <FileText className="h-8 w-8 text-muted-foreground" aria-hidden="true" />
+                    </div>
+                  )}
+                  <div className="px-2 py-1">
+                    <p className="truncate text-xs font-medium text-foreground">{att.name}</p>
+                    {att.size ? <p className="text-[10px] text-muted-foreground">{formatBytes(att.size)}</p> : null}
+                  </div>
+                </button>
+                <button
+                  type="button"
+                  onClick={() => remove(att.id)}
+                  aria-label={`Remove ${att.name}`}
+                  className="absolute right-1 top-1 rounded-full bg-slate-900/60 p-0.5 text-white opacity-0 transition-opacity hover:bg-slate-900/80 group-hover:opacity-100"
+                >
+                  <X className="h-3.5 w-3.5" />
+                </button>
+              </div>
+            )
+          })}
+        </div>
+      )}
+
+      <AttachmentPreviewDialog attachment={preview} onClose={() => setPreview(null)} />
+    </Collapsible>
+  )
+}
+
+/** Lightbox preview for an attachment. Images render large; non-images show
+ * name/type/size with a note that inline preview isn't available plus an
+ * open/download link (the url is a data URL). Closes on overlay click / X. */
+function AttachmentPreviewDialog({
+  attachment,
+  onClose,
+}: {
+  attachment: OrderAttachment | null
+  onClose: () => void
+}) {
+  const isImage = attachment?.type.startsWith('image/') ?? false
+  return (
+    <Dialog open={Boolean(attachment)} onOpenChange={(o) => !o && onClose()}>
+      <DialogContent size="lg">
+        <DialogHeader>
+          <DialogTitle className="truncate">{attachment?.name ?? 'Attachment'}</DialogTitle>
+          <DialogClose asChild>
+            <Button variant="ghost" size="icon" aria-label="Close">
+              <X className="h-4 w-4" />
+            </Button>
+          </DialogClose>
+        </DialogHeader>
+        <div className="p-5">
+          {attachment && isImage ? (
+            <img
+              src={attachment.url}
+              alt={attachment.name}
+              className="mx-auto max-h-[70vh] w-auto rounded-md object-contain"
+            />
+          ) : attachment ? (
+            <div className="flex flex-col items-center gap-3 py-8 text-center">
+              <FileText className="h-14 w-14 text-muted-foreground" aria-hidden="true" />
+              <div>
+                <p className="text-sm font-medium text-foreground">{attachment.name}</p>
+                <p className="text-xs text-muted-foreground">
+                  {attachment.type || 'Unknown type'}
+                  {attachment.size ? ` · ${formatBytes(attachment.size)}` : ''}
+                </p>
+              </div>
+              <p className="text-sm text-muted-foreground">Preview isn’t available for this file type.</p>
+              <a
+                href={attachment.url}
+                download={attachment.name}
+                target="_blank"
+                rel="noreferrer"
+                className="text-sm font-medium text-primary-700 underline-offset-4 hover:underline dark:text-primary-300"
+              >
+                Open / download
+              </a>
+            </div>
+          ) : null}
+        </div>
+      </DialogContent>
+    </Dialog>
   )
 }

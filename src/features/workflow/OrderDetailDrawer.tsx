@@ -1,6 +1,8 @@
 import * as React from 'react'
 import { X } from 'lucide-react'
 import { useOrder, useUpdateOrder } from '@/hooks/useOrders'
+import { useWorkflowStatuses } from '@/hooks/useWorkflowStatuses'
+import { orderGlLines } from '@/features/orders/glImpact'
 import { toast } from '@/components/ui/toastStore'
 import { Dialog, DialogContent } from '@/components/ui/Dialog'
 import { Tabs, TabsList, TabsTrigger, TabsContent } from '@/components/ui/Tabs'
@@ -12,6 +14,7 @@ import { ServicesEditor } from '@/features/orders/ServicesEditor'
 import { InspectionsTab } from '@/features/workflow/InspectionsTab'
 import { PaymentsTab } from '@/features/workflow/PaymentsTab'
 import { ActivityTab } from '@/features/workflow/ActivityTab'
+import { SystemNotesTab } from '@/features/workflow/SystemNotesTab'
 import { MessageThread } from '@/features/messaging/MessageThread'
 import { ORDER_STATUS_LABEL, ORDER_STATUS_VARIANT } from '@/features/orders/statusDisplay'
 import { formatMoney } from '@/lib/utils'
@@ -33,7 +36,13 @@ export function OrderDetailDrawer({ orderId, onClose }: OrderDetailDrawerProps) 
 
   return (
     <Dialog open onOpenChange={(open) => !open && onClose()}>
-      <DialogContent size="wide" className="flex max-h-[88vh] flex-col p-0">
+      {/* Fixed height (not max-h) gives the modal a stable frame across tabs and
+       * a bounded height for the inner scroll region. `overflow-hidden` +
+       * `min-h-0` down the flex chain means only the tab-content region scrolls. */}
+      <DialogContent
+        size="wide"
+        className="flex h-[88vh] min-h-[560px] w-full min-w-0 flex-col overflow-hidden p-0"
+      >
         {/* Clean header: inline-editable job title, id, status badge, close ✕. */}
         <header className="flex items-start justify-between gap-4 border-b border-border p-5">
           {loading ? (
@@ -76,7 +85,9 @@ export function OrderDetailDrawer({ orderId, onClose }: OrderDetailDrawerProps) 
                 <TabsTrigger value="inspections">Inspections</TabsTrigger>
                 <TabsTrigger value="messages">Messages</TabsTrigger>
                 <TabsTrigger value="payments">Payments</TabsTrigger>
+                <TabsTrigger value="gl">GL Impact</TabsTrigger>
                 <TabsTrigger value="activity">Activity</TabsTrigger>
+                <TabsTrigger value="system">System notes</TabsTrigger>
               </TabsList>
 
               <div className="min-h-0 flex-1 overflow-y-auto p-4 scrollbar-thin">
@@ -92,8 +103,14 @@ export function OrderDetailDrawer({ orderId, onClose }: OrderDetailDrawerProps) 
                 <TabsContent value="payments">
                   <PaymentsTab order={order} />
                 </TabsContent>
+                <TabsContent value="gl">
+                  <GlImpactTab order={order} />
+                </TabsContent>
                 <TabsContent value="activity">
                   <ActivityTab orderId={order.id} />
+                </TabsContent>
+                <TabsContent value="system">
+                  <SystemNotesTab order={order} />
                 </TabsContent>
               </div>
             </Tabs>
@@ -159,6 +176,90 @@ function InlineTitle({ order }: { order: Order }) {
     >
       {order.title || `#${order.number}`}
     </button>
+  )
+}
+
+/** NetSuite-style "GL Impact" subtab: a double-entry table (Account | Debit |
+ * Credit) derived from the order + its workflow column via the shared
+ * `orderGlLines` helper — the same logic the reports aggregate over. Money is
+ * right-aligned, a zero cell renders blank, and the bold Totals row proves the
+ * debits equal the credits for the posting. */
+function GlImpactTab({ order }: { order: Order }) {
+  const statusesQuery = useWorkflowStatuses()
+  const columnName = React.useMemo(
+    () => (statusesQuery.data ?? []).find((s) => s.id === order.workflowStatusId)?.name ?? '',
+    [statusesQuery.data, order.workflowStatusId],
+  )
+  const lines = React.useMemo(() => orderGlLines(order, columnName), [order, columnName])
+  const totalDebit = lines.reduce((s, l) => s + l.debit, 0)
+  const totalCredit = lines.reduce((s, l) => s + l.credit, 0)
+  const stage = columnName.trim().toLowerCase() === 'done' ? 'Collected' : 'Billed'
+
+  const cell = (n: number) => (n ? formatMoney(n) : '')
+
+  return (
+    <div className="mx-auto max-w-2xl">
+      <div className="mb-3 flex items-center justify-between gap-2">
+        <div>
+          <h3 className="text-sm font-semibold text-foreground">GL Impact</h3>
+          <p className="text-xs text-muted-foreground">
+            Posting derived from the order's workflow stage
+            {columnName ? (
+              <>
+                {' '}
+                (<span className="font-medium text-foreground">{columnName}</span>)
+              </>
+            ) : null}
+            .
+          </p>
+        </div>
+        <Badge variant={stage === 'Collected' ? 'success' : 'default'}>{stage}</Badge>
+      </div>
+
+      <div className="overflow-hidden rounded-lg border border-border bg-card">
+        <table className="w-full text-sm tabular-nums">
+          <thead>
+            <tr className="border-b border-border bg-muted/50 text-xs uppercase tracking-wide text-muted-foreground">
+              <th className="px-4 py-2.5 text-left font-semibold">Account</th>
+              <th className="px-4 py-2.5 text-center font-semibold">Posting</th>
+              <th className="px-4 py-2.5 text-right font-semibold">Debit</th>
+              <th className="px-4 py-2.5 text-right font-semibold">Credit</th>
+            </tr>
+          </thead>
+          <tbody>
+            {lines.length === 0 ? (
+              <tr>
+                <td colSpan={4} className="px-4 py-6 text-center text-sm text-muted-foreground">
+                  No GL impact for this order yet.
+                </td>
+              </tr>
+            ) : (
+              lines.map((line, i) => (
+                <tr key={i} className="border-b border-border/60">
+                  <td className="px-4 py-2 text-foreground">{line.account}</td>
+                  <td className="px-4 py-2 text-center">
+                    <Badge variant={line.posting ? 'success' : 'secondary'}>{line.posting ? 'Yes' : 'No'}</Badge>
+                  </td>
+                  <td className="px-4 py-2 text-right text-foreground">{cell(line.debit)}</td>
+                  <td className="px-4 py-2 text-right text-foreground">{cell(line.credit)}</td>
+                </tr>
+              ))
+            )}
+          </tbody>
+          <tfoot>
+            <tr className="border-t-2 border-foreground/40 font-bold">
+              <td className="px-4 py-2.5 text-foreground">Totals</td>
+              <td className="px-4 py-2.5" />
+              <td className="px-4 py-2.5 text-right text-foreground">{formatMoney(totalDebit)}</td>
+              <td className="px-4 py-2.5 text-right text-foreground">{formatMoney(totalCredit)}</td>
+            </tr>
+          </tfoot>
+        </table>
+        <p className="border-t border-border px-4 py-2 text-[11px] text-muted-foreground">
+          Debits must equal credits. Mock accounting model for demonstration.
+        </p>
+      </div>
+    </div>
   )
 }
 

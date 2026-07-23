@@ -1,10 +1,50 @@
 import * as React from 'react'
-import { useDroppable } from '@dnd-kit/core'
-import { MoreHorizontal, DollarSign, Archive, Pencil, Plus } from 'lucide-react'
+import { useDraggable, useDroppable } from '@dnd-kit/core'
+import { MoreHorizontal, Archive, Pencil } from 'lucide-react'
 import type { Customer, Order, Vehicle, WorkflowStatus } from '@/types'
 import type { TeamMember } from '@/hooks/useUsers'
 import { OrderCard } from '@/features/workflow/OrderCard'
 import { cn } from '@/lib/utils'
+
+/**
+ * Library-free FLIP reflow for a card list. Tracks each card element's previous
+ * bounding rect (keyed by its `data-flip-id`) and, in a layout effect after the
+ * card set changes, plays a short translateY animation for every still-present
+ * card from its OLD position to its new one — so when a card leaves (or arrives)
+ * the others ease into place instead of snapping. Returns a ref to attach to the
+ * scroll/list container. `key` is a cheap signature of the current card ids that
+ * re-runs the effect only when the set actually changes.
+ */
+function useFlipReflow(key: string) {
+  const containerRef = React.useRef<HTMLDivElement>(null)
+  const prevRects = React.useRef<Map<string, DOMRect>>(new Map())
+
+  React.useLayoutEffect(() => {
+    const container = containerRef.current
+    if (!container) return
+    const els = container.querySelectorAll<HTMLElement>('[data-flip-id]')
+    const next = new Map<string, DOMRect>()
+    els.forEach((el) => {
+      const id = el.dataset.flipId
+      if (!id) return
+      const rect = el.getBoundingClientRect()
+      next.set(id, rect)
+      const prev = prevRects.current.get(id)
+      if (prev) {
+        const dy = prev.top - rect.top
+        if (dy) {
+          el.animate(
+            [{ transform: `translateY(${dy}px)` }, { transform: 'translateY(0)' }],
+            { duration: 180, easing: 'ease-out' },
+          )
+        }
+      }
+    })
+    prevRects.current = next
+  }, [key])
+
+  return containerRef
+}
 
 export interface ColumnProps {
   status: WorkflowStatus
@@ -22,10 +62,15 @@ export interface ColumnProps {
   onArchive?: () => void
   /** Rename this column. */
   onRename?: () => void
-  /** Create a new job/card in THIS column with the given title. */
-  onCreateCard?: (title: string) => void
-  /** True while a create-card request is in flight. */
-  creating?: boolean
+  /** Total (unfiltered) card count — badge shows "shown/total" when filtering. */
+  totalCount?: number
+  /** Whether a board filter is narrowing the cards (drives the shown/total badge). */
+  filterActive?: boolean
+  /** Order id that was just dropped into a column — that card flashes green. */
+  justMovedId?: string | null
+  /** Called by the flashed card when its green animation ends, so the board can
+   * clear `justMovedId` (the animation, not a timer, owns the flash lifetime). */
+  onFlashEnd?: (orderId: string) => void
 }
 
 export function Column({
@@ -40,61 +85,47 @@ export function Column({
   isOverColumn = false,
   onArchive,
   onRename,
-  onCreateCard,
-  creating = false,
+  totalCount,
+  filterActive = false,
+  justMovedId = null,
+  onFlashEnd,
 }: ColumnProps) {
-  const { setNodeRef, isOver } = useDroppable({ id: status.id, data: { workflowStatusId: status.id } })
+  // The whole column body is the droppable target — a drop anywhere in it lands
+  // the card at the TOP of this column's list (index 0).
+  const { setNodeRef, isOver } = useDroppable({ id: status.id, data: { type: 'column', workflowStatusId: status.id } })
   const [menuOpen, setMenuOpen] = React.useState(false)
-  const [adding, setAdding] = React.useState(false)
-  const [draft, setDraft] = React.useState('')
 
-  // Show the dashed landing slot when a card is dragged over this column and it
-  // isn't already the card's home column (no point showing "lands here" in place).
-  const showPlaceholder = isOverColumn && !!activeOrder && activeOrder.workflowStatusId !== status.id
+  // During a drag, every column EXCEPT the card's source column turns its whole
+  // body into a blue drop zone with the column name centered, hiding the cards.
+  // The SOURCE column keeps its cards visible and shows a not-allowed cursor —
+  // dropping a card back on its own column is not a valid move.
+  const dragActive = !!activeOrder
+  const isSource = activeOrder?.workflowStatusId === status.id
+  const showDropZone = dragActive && !isSource
 
-  // A column tied to a payment/pickup milestone gets a small green $ accent.
-  const showMoneyAccent = /pickup|ready|invoice/i.test(status.name) || status.rule === 'archive_paid'
-
-  function submitDraft() {
-    const title = draft.trim()
-    if (!title) {
-      setAdding(false)
-      return
-    }
-    onCreateCard?.(title)
-    setDraft('')
-    setAdding(false)
-  }
+  // Smooth (Jira-like) reflow of the remaining cards when the card set changes
+  // (e.g. a card is dragged OUT to another column): the others slide into place.
+  const listRef = useFlipReflow(orders.map((o) => o.id).join(','))
 
   return (
     <div
       ref={setNodeRef}
       className={cn(
-        // Column FITS ITS CONTENT (the "+ Create" footer sits right below the
-        // last card) but caps at the available board height via `max-h-full` —
-        // once it hits the cap the card list scrolls INTERNALLY and "+ Create"
-        // stays pinned at the bottom, so the page never scrolls. 288px wide; the
-        // extra width over the 262px card leaves room for a scrollbar gutter.
-        'flex max-h-full w-[288px] shrink-0 flex-col rounded-xl border border-border bg-muted/40 transition-colors',
-        isOver && 'border-primary-400 bg-primary-50/60 dark:bg-primary-500/10',
+        // Column always fills the full board height (so every container reaches
+        // the bottom, like a full column). The card list scrolls INTERNALLY and
+        // "+ Create" stays pinned at the bottom; the page never scrolls. 288px
+        // wide; the extra width over the 262px card leaves a scrollbar gutter.
+        'flex min-h-full w-[288px] shrink-0 flex-col rounded-xl border border-border bg-muted/40 transition-colors',
+        isOver && 'border-primary-400',
+        // Dropping a card on its own source column is a no-op — show ⊘.
+        isSource && 'cursor-not-allowed',
       )}
     >
       <div className="flex items-center justify-between gap-2 px-3 py-2.5">
         <div className="flex min-w-0 items-center gap-2">
-          {showMoneyAccent ? (
-            <span className="flex h-5 w-5 items-center justify-center rounded-full bg-green-100 text-green-600 dark:bg-green-500/20 dark:text-green-400">
-              <DollarSign className="h-3.5 w-3.5" />
-            </span>
-          ) : (
-            <span
-              className="h-2.5 w-2.5 shrink-0 rounded-full"
-              style={{ backgroundColor: status.color || '#2b54d9' }}
-              aria-hidden="true"
-            />
-          )}
-          <h3 className="truncate text-sm font-semibold leading-none text-foreground">{status.name}</h3>
-          <span className="inline-flex h-5 min-w-5 items-center justify-center rounded-md border border-border bg-card px-1.5 text-xs font-semibold text-muted-foreground">
-            {orders.length}
+          <h3 className="truncate text-xs font-medium uppercase tracking-wide text-foreground">{status.name}</h3>
+          <span className="inline-flex h-5 min-w-5 items-center justify-center rounded-md bg-slate-700 px-1.5 text-xs font-semibold tabular-nums text-slate-100 dark:bg-slate-500 dark:text-white">
+            {filterActive ? `${orders.length}/${totalCount ?? orders.length}` : orders.length}
           </span>
         </div>
         <div className="relative">
@@ -136,83 +167,100 @@ export function Column({
       {/* Card list — scrolls vertically. Small left gap (pl-1.5) with the right
           scrollbar gutter kept (pr-2 + stable gutter) so the card sits close to
           the left edge while the scrollbar never overlaps the card's right edge. */}
-      <div
-        className="min-h-0 flex-1 space-y-2 overflow-y-auto py-2 pl-1.5 pr-2 scrollbar-thin"
-        style={{ scrollbarGutter: 'stable' }}
-      >
-        {orders.map((order) => (
-          <OrderCard
-            key={order.id}
-            order={order}
-            customer={customersById.get(order.customerId)}
-            vehicle={vehiclesById.get(order.vehicleId)}
-            usersById={usersById}
-            density={density}
-            onClick={() => onCardClick(order.id)}
-          />
-        ))}
-        {/* Jira-style dashed landing slot at the drop position. */}
-        {showPlaceholder && (
-          <div
-            aria-hidden="true"
-            className="mx-auto w-[262px] rounded-lg border-2 border-dashed border-primary-400 bg-primary-50/60 dark:border-primary-500/60 dark:bg-primary-500/10"
-            style={{ height: density === 'condensed' ? 88 : 120 }}
-          />
-        )}
-        {orders.length === 0 && !showPlaceholder && (
-          <p className="p-4 text-center text-xs text-muted-foreground">Drop a card here</p>
-        )}
-      </div>
-
-      {/* "+ Create" footer — pinned to the bottom of the column (Jira-style). */}
-      <div className="shrink-0 border-t border-border p-1.5">
-        {adding ? (
-          <div className="space-y-1.5">
-            <textarea
-              autoFocus
-              value={draft}
-              onChange={(e) => setDraft(e.target.value)}
-              onKeyDown={(e) => {
-                if (e.key === 'Enter' && !e.shiftKey) {
-                  e.preventDefault()
-                  submitDraft()
-                } else if (e.key === 'Escape') {
-                  setAdding(false)
-                  setDraft('')
-                }
-              }}
-              placeholder="Enter a title for this job…"
-              rows={2}
-              className="w-full resize-none rounded-md border border-input bg-card px-2 py-1.5 text-sm placeholder:text-muted-foreground focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring"
+      {/* Card list. During a drag the blue drop zone is OVERLAID on top of the
+          still-mounted cards (not swapped in for them) so the cards reappear
+          instantly and smoothly on drop instead of unmounting + remounting
+          (which reloaded images and caused the flicker). */}
+      <div className="relative flex-1 py-2 pl-1.5 pr-2">
+        <div ref={listRef} className="space-y-2">
+          {orders.map((order) => (
+            <DraggableOrderCard
+              key={order.id}
+              order={order}
+              customer={customersById.get(order.customerId)}
+              vehicle={vehiclesById.get(order.vehicleId)}
+              usersById={usersById}
+              density={density}
+              flash={order.id === justMovedId}
+              onFlashEnd={() => onFlashEnd?.(order.id)}
+              onClick={() => onCardClick(order.id)}
             />
-            <div className="flex items-center gap-2">
-              <button
-                onClick={submitDraft}
-                disabled={creating}
-                className="rounded-md bg-primary-600 px-2.5 py-1 text-xs font-semibold text-white hover:bg-primary-700 disabled:opacity-60"
-              >
-                Add job
-              </button>
-              <button
-                onClick={() => {
-                  setAdding(false)
-                  setDraft('')
-                }}
-                className="rounded-md px-2 py-1 text-xs font-medium text-muted-foreground hover:bg-muted"
-              >
-                Cancel
-              </button>
-            </div>
-          </div>
-        ) : (
-          <button
-            onClick={() => setAdding(true)}
-            className="flex w-full items-center gap-1.5 rounded-md px-2 py-1.5 text-left text-sm font-medium text-muted-foreground transition-colors hover:bg-muted hover:text-foreground"
+          ))}
+          {orders.length === 0 && (
+            <p className="p-4 text-center text-xs text-muted-foreground">Drop a card here</p>
+          )}
+        </div>
+
+        {showDropZone && (
+          // Opaque blue zone overlaying the (still-mounted) cards — column name
+          // centered; stronger blue when hovered.
+          <div
+            className={cn(
+              'absolute inset-1.5 z-10 flex items-center justify-center rounded-lg border-2 border-dashed transition-colors',
+              isOverColumn
+                ? 'border-primary-500 bg-primary-100 dark:border-primary-400 dark:bg-primary-950'
+                : 'border-primary-300 bg-primary-50 dark:border-primary-500/50 dark:bg-primary-950',
+            )}
           >
-            <Plus className="h-4 w-4" /> Create
-          </button>
+            <span className="select-none text-sm font-bold uppercase tracking-wide text-primary-700 dark:text-primary-300">
+              {status.name}
+            </span>
+          </div>
         )}
       </div>
+    </div>
+  )
+}
+
+/**
+ * A single board card made draggable via `@dnd-kit/core`'s `useDraggable`. Cards
+ * move only BETWEEN columns (no positional reordering), so there is no sortable
+ * gap/transform. The presentational `OrderCard` lives inside; its own onClick
+ * (open modal) still fires because the 6px activation distance separates a click
+ * from a drag. The original slot dims while dragging.
+ */
+function DraggableOrderCard({
+  order,
+  customer,
+  vehicle,
+  usersById,
+  density,
+  flash,
+  onFlashEnd,
+  onClick,
+}: {
+  order: Order
+  customer?: Customer
+  vehicle?: Vehicle
+  usersById: Map<string, TeamMember>
+  density: 'standard' | 'condensed'
+  flash: boolean
+  onFlashEnd?: () => void
+  onClick: () => void
+}) {
+  const { attributes, listeners, setNodeRef, isDragging } = useDraggable({
+    id: order.id,
+    data: { type: 'card', order },
+  })
+
+  return (
+    <div
+      ref={setNodeRef}
+      data-flip-id={order.id}
+      {...attributes}
+      {...listeners}
+      className={cn('touch-none', isDragging && 'opacity-40')}
+    >
+      <OrderCard
+        order={order}
+        customer={customer}
+        vehicle={vehicle}
+        usersById={usersById}
+        density={density}
+        flash={flash}
+        onFlashEnd={onFlashEnd}
+        onClick={onClick}
+      />
     </div>
   )
 }

@@ -1,5 +1,4 @@
 import * as React from 'react'
-import { useDraggable } from '@dnd-kit/core'
 import { Car, User, Pencil, Flame, Gauge } from 'lucide-react'
 import type { Customer, Order, OrderLabelColor, Vehicle } from '@/types'
 import type { TeamMember } from '@/hooks/useUsers'
@@ -15,6 +14,11 @@ export interface OrderCardProps {
   onClick: () => void
   /** Roster for resolving assigned mechanic names/colors on the card. */
   usersById?: Map<string, TeamMember>
+  /** Briefly flash green (just dropped into this column). */
+  flash?: boolean
+  /** Fired when the green flash animation finishes so the parent can clear the
+   * flash state (the animation owns its own lifetime — no racing timer). */
+  onFlashEnd?: () => void
 }
 
 const LABEL_CLASSES: Record<OrderLabelColor, string> = {
@@ -26,16 +30,7 @@ const LABEL_CLASSES: Record<OrderLabelColor, string> = {
   gray: 'bg-slate-100 text-slate-600 dark:bg-slate-500/20 dark:text-slate-300',
 }
 
-export function OrderCard({ order, vehicle, density, onClick, usersById }: OrderCardProps) {
-  const { attributes, listeners, setNodeRef, transform, isDragging } = useDraggable({
-    id: order.id,
-    data: { order },
-  })
-
-  const style = transform
-    ? { transform: `translate3d(${transform.x}px, ${transform.y}px, 0)` }
-    : undefined
-
+export function OrderCard({ order, vehicle, density, onClick, usersById, flash, onFlashEnd }: OrderCardProps) {
   // Title without the leading "#<number>" — the id now lives in the footer. Fall
   // back to the job number when a card has no title.
   const title = order.title || `#${order.number}`
@@ -48,33 +43,39 @@ export function OrderCard({ order, vehicle, density, onClick, usersById }: Order
 
   return (
     <div
-      ref={setNodeRef}
-      style={style}
-      {...listeners}
-      {...attributes}
       onClick={onClick}
       role="button"
       tabIndex={0}
+      onAnimationEnd={(e) => {
+        // Only react to OUR flash keyframe (ignore any other animations that may
+        // bubble), then hand the lifetime back to the board to clear the flash.
+        if (flash && e.animationName.includes('flash-green')) onFlashEnd?.()
+      }}
       className={cn(
         // Strict 262px width so cards sit cleanly inside the column.
         'group w-[262px] cursor-pointer overflow-hidden rounded-lg border border-border bg-card shadow-card transition-shadow hover:shadow-pop',
         'focus-visible:outline-none focus-visible:ring-2 focus-visible:ring-ring',
-        isDragging && 'opacity-40',
+        flash && 'animate-flash-green',
       )}
     >
-      {/* Car photo, inset with a small gap to the card edge (p-2 wrapper) so the
-          card border reads as distinct and the photo doesn't bleed to the edges.
-          Prefers a licensed drop-in photo (/car-photos/<vehicleId>.jpg), then the
-          order's own photos[], then the generated placeholder. */}
-      <div className="p-2 pb-0">
-        <div className="h-28 w-full overflow-hidden rounded-lg bg-muted">
-          <CarThumb
-            vehicleId={order.vehicleId}
-            fallbackUrl={mainPhoto?.url}
-            alt={vehicleColorFirst(vehicle)}
-          />
+      {/* Car photo (Jira-style): rendered ONLY when the order actually has a photo
+          entry. Cards with no photo show no thumbnail box at all — the card starts
+          at the title. When present, the thumbnail still prefers a licensed drop-in
+          photo (/car-photos/<vehicleId>.jpg) over the order's own photo. Inset with
+          a small gap (p-2 wrapper) so the card border reads as distinct.
+          NOTE: drop-in photos are only honored for orders that have a photos[]
+          entry; a bare drop-in without a photos[] entry won't surface a thumbnail. */}
+      {mainPhoto && (
+        <div className="p-2 pb-0">
+          <div className="h-28 w-full overflow-hidden rounded-lg bg-muted">
+            <CarThumb
+              vehicleId={order.vehicleId}
+              fallbackUrl={mainPhoto.url}
+              alt={vehicleColorFirst(vehicle)}
+            />
+          </div>
         </div>
-      </div>
+      )}
 
       {/* Details area — content-height (Jira-style: cards grow with content). */}
       <div className={cn('flex flex-col', density === 'condensed' ? 'p-2.5' : 'px-3 pb-3 pt-2')}>
@@ -82,7 +83,7 @@ export function OrderCard({ order, vehicle, density, onClick, usersById }: Order
             order modal (same as clicking the card). Stops propagation so the
             card's own onClick doesn't also fire (double-open). */}
         <div className="flex items-start justify-between gap-2">
-          <p className="truncate text-sm font-semibold text-primary-700 hover:underline dark:text-primary-300">
+          <p className="truncate text-sm font-medium text-foreground">
             {title}
           </p>
           <button
@@ -104,7 +105,7 @@ export function OrderCard({ order, vehicle, density, onClick, usersById }: Order
             {(order.labels ?? []).map((label) => (
               <span
                 key={label.id}
-                className={cn('rounded-full px-2 py-0.5 text-[11px] font-medium leading-none', LABEL_CLASSES[label.color])}
+                className={cn('rounded-sm px-2 py-0.5 text-[11px] font-medium leading-none', LABEL_CLASSES[label.color])}
               >
                 {label.text}
               </span>
@@ -172,8 +173,15 @@ function CarThumb({
     return list
   }, [vehicleId, fallbackUrl])
 
-  const [idx, setIdx] = React.useState(0)
-  React.useEffect(() => setIdx(0), [candidates])
+  // Start at the first candidate that hasn't already 404'd in a previous mount,
+  // so re-mounting a card (e.g. after a drag-drop) doesn't re-request the known-
+  // missing drop-in photo and flicker before falling back.
+  const firstUsable = (list: string[]) => {
+    const i = list.findIndex((c) => !FAILED_IMG_SRC.has(c))
+    return i === -1 ? list.length : i
+  }
+  const [idx, setIdx] = React.useState(() => firstUsable(candidates))
+  React.useEffect(() => setIdx(firstUsable(candidates)), [candidates])
 
   const src = candidates[idx]
   if (!src) {
@@ -188,11 +196,23 @@ function CarThumb({
       src={src}
       alt={alt}
       draggable={false}
-      onError={() => setIdx((i) => i + 1)}
+      onError={() => {
+        FAILED_IMG_SRC.add(src)
+        setIdx((i) => {
+          let n = i + 1
+          while (n < candidates.length && FAILED_IMG_SRC.has(candidates[n] as string)) n++
+          return n
+        })
+      }}
       className="h-full w-full rounded-lg object-cover"
     />
   )
 }
+
+// Module-level cache of image srcs that already failed to load (e.g. the missing
+// `/car-photos/<id>.jpg` drop-in). Persists across card mounts so a remount goes
+// straight to the working source instead of re-attempting the 404.
+const FAILED_IMG_SRC = new Set<string>()
 
 /** Overlapping mechanic avatars (up to 3). Any extra assignees collapse into a
  * "+N" circle whose CLICK opens a small dropdown listing the remaining people
