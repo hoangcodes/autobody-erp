@@ -38,6 +38,17 @@ export function formatDate(value: string | Date | null | undefined): string {
   return dateFormatter.format(d)
 }
 
+/** Compact Jira-style date, e.g. "17/Jul/26". Used by the work-items lists. */
+export function formatDateShort(value: string | Date | null | undefined): string {
+  if (!value) return '—'
+  const d = typeof value === 'string' ? new Date(value) : value
+  if (Number.isNaN(d.getTime())) return '—'
+  const day = String(d.getDate()).padStart(2, '0')
+  const month = d.toLocaleString('en-US', { month: 'short' })
+  const year = String(d.getFullYear()).slice(-2)
+  return `${day}/${month}/${year}`
+}
+
 export function formatDateTime(value: string | Date | null | undefined): string {
   if (!value) return '—'
   const d = typeof value === 'string' ? new Date(value) : value

@@ -1,10 +1,19 @@
 import * as React from 'react'
-import { ArrowRightCircle, Trash2, Plus, Car, User } from 'lucide-react'
+import { ArrowRightCircle, Trash2, Plus } from 'lucide-react'
 import { PageHeader } from '@/components/PageHeader'
+import { WorkItemsTable, type WorkItemColumn } from '@/components/WorkItemsTable'
 import { Input } from '@/components/ui/Input'
 import { Button } from '@/components/ui/Button'
-import { Skeleton } from '@/components/ui/Skeleton'
-import { EmptyState, ErrorState } from '@/components/ui/EmptyState'
+import { Label } from '@/components/ui/Label'
+import { ErrorState } from '@/components/ui/EmptyState'
+import {
+  Dialog,
+  DialogContent,
+  DialogHeader,
+  DialogTitle,
+  DialogBody,
+  DialogFooter,
+} from '@/components/ui/Dialog'
 import {
   Select,
   SelectContent,
@@ -20,10 +29,16 @@ import {
   useDeleteBacklogItem,
   useMoveBacklogToBoard,
 } from '@/hooks/useBacklog'
-import { customerDisplayName, cn } from '@/lib/utils'
+import { customerDisplayName, formatDateShort } from '@/lib/utils'
 import type { BacklogItem } from '@/types'
 
 const NONE = '__none__'
+
+/** "BL-12" style key derived from the item id (digits only). */
+function backlogKey(item: BacklogItem): string {
+  const n = item.id.replace(/\D/g, '')
+  return `BL-${n || item.id}`
+}
 
 /**
  * Jira-backlog-style list. Users add lightweight work items at the top, and any
@@ -37,12 +52,22 @@ export function BacklogPage() {
   const moveToBoard = useMoveBacklogToBoard()
   const deleteItem = useDeleteBacklogItem()
 
+  // Create-item modal (opened from the "+ New Job" button next to the search bar).
+  const [createOpen, setCreateOpen] = React.useState(false)
   const [title, setTitle] = React.useState('')
   const [customerId, setCustomerId] = React.useState<string>(NONE)
   const [vehicle, setVehicle] = React.useState('')
   const [note, setNote] = React.useState('')
 
   const customers = customersQuery.data?.items ?? []
+
+  function openCreate() {
+    setTitle('')
+    setCustomerId(NONE)
+    setVehicle('')
+    setNote('')
+    setCreateOpen(true)
+  }
 
   function add() {
     if (!title.trim()) return
@@ -57,6 +82,7 @@ export function BacklogPage() {
       },
       {
         onSuccess: () => {
+          setCreateOpen(false)
           setTitle('')
           setCustomerId(NONE)
           setVehicle('')
@@ -74,6 +100,53 @@ export function BacklogPage() {
     })
   }
 
+  const columns: WorkItemColumn<BacklogItem>[] = [
+    {
+      key: 'key',
+      header: 'Key',
+      sortValue: (i) => Number(i.id.replace(/\D/g, '')) || 0,
+      render: (i) => <span className="font-medium text-muted-foreground">{backlogKey(i)}</span>,
+    },
+    {
+      key: 'summary',
+      header: 'Summary',
+      sortValue: (i) => i.title,
+      render: (i) => (
+        <span className="font-medium text-primary-700 hover:underline dark:text-primary-300">{i.title}</span>
+      ),
+    },
+    {
+      key: 'customer',
+      header: 'Customer',
+      sortValue: (i) => i.customerName ?? '',
+      render: (i) =>
+        i.customerName ? i.customerName : <span className="text-muted-foreground">—</span>,
+    },
+    {
+      key: 'vehicle',
+      header: 'Vehicle',
+      sortValue: (i) => i.vehicleName ?? '',
+      render: (i) =>
+        i.vehicleName ? i.vehicleName : <span className="text-muted-foreground">—</span>,
+    },
+    {
+      key: 'note',
+      header: 'Note',
+      render: (i) =>
+        i.note ? (
+          <span className="italic text-muted-foreground">{i.note}</span>
+        ) : (
+          <span className="text-muted-foreground">—</span>
+        ),
+    },
+    {
+      key: 'created',
+      header: 'Created',
+      sortValue: (i) => +new Date(i.createdAt),
+      render: (i) => <span className="text-muted-foreground">{formatDateShort(i.createdAt)}</span>,
+    },
+  ]
+
   return (
     <div>
       <PageHeader
@@ -81,105 +154,47 @@ export function BacklogPage() {
         description="Capture upcoming work before it hits the board. Add an item, then move it into Workflow when you're ready."
       />
 
-      {/* Quick add row */}
-      <div className="mb-4 rounded-lg border border-border bg-card p-3 shadow-card">
-        <div className="grid grid-cols-1 gap-2 md:grid-cols-[1fr_180px_180px_auto]">
-          <Input
-            value={title}
-            onChange={(e) => setTitle(e.target.value)}
-            placeholder="What needs doing? (e.g. Grinding noise on braking)"
-            onKeyDown={(e) => e.key === 'Enter' && add()}
-            aria-label="Backlog item title"
-          />
-          <Select value={customerId} onValueChange={setCustomerId}>
-            <SelectTrigger aria-label="Customer">
-              <SelectValue placeholder="Customer (optional)" />
-            </SelectTrigger>
-            <SelectContent>
-              <SelectItem value={NONE}>No customer</SelectItem>
-              {customers.map((c) => (
-                <SelectItem key={c.id} value={c.id}>
-                  {customerDisplayName(c)}
-                </SelectItem>
-              ))}
-            </SelectContent>
-          </Select>
-          <Input
-            value={vehicle}
-            onChange={(e) => setVehicle(e.target.value)}
-            placeholder="Vehicle (optional)"
-            aria-label="Vehicle"
-          />
-          <Button onClick={add} loading={createItem.isPending} disabled={!title.trim()}>
-            <Plus className="h-4 w-4" /> Add
-          </Button>
-        </div>
-        <Input
-          value={note}
-          onChange={(e) => setNote(e.target.value)}
-          placeholder="Note (optional)"
-          aria-label="Note"
-          className="mt-2"
-        />
-      </div>
-
       {itemsQuery.isError ? (
         <ErrorState onRetry={() => itemsQuery.refetch()} />
-      ) : itemsQuery.isLoading ? (
-        <div className="space-y-2">
-          {Array.from({ length: 4 }).map((_, i) => (
-            <Skeleton key={i} className="h-16 w-full" />
-          ))}
-        </div>
-      ) : (itemsQuery.data ?? []).length === 0 ? (
-        <EmptyState title="Backlog is empty" description="Add your first item above to start planning work." />
       ) : (
-        <div className="overflow-hidden rounded-lg border border-border bg-card">
-          <ul className="divide-y divide-border">
-            {(itemsQuery.data ?? []).map((item) => (
-              <li key={item.id} className="flex items-start gap-3 p-3 hover:bg-muted/30">
-                <div className="mt-0.5 flex h-6 w-6 shrink-0 items-center justify-center rounded bg-muted text-muted-foreground">
-                  <span className="text-xs font-semibold">•</span>
-                </div>
-                <div className="min-w-0 flex-1">
-                  <p className="truncate text-sm font-medium text-foreground">{item.title}</p>
-                  <div className="mt-1 flex flex-wrap items-center gap-x-3 gap-y-1 text-xs text-muted-foreground">
-                    {item.customerName && (
-                      <span className="inline-flex items-center gap-1">
-                        <User className="h-3.5 w-3.5" /> {item.customerName}
-                      </span>
-                    )}
-                    {item.vehicleName && (
-                      <span className="inline-flex items-center gap-1">
-                        <Car className="h-3.5 w-3.5" /> {item.vehicleName}
-                      </span>
-                    )}
-                    {item.note && <span className="italic">{item.note}</span>}
-                  </div>
-                </div>
-                <div className="flex shrink-0 items-center gap-1">
-                  <Button
-                    size="sm"
-                    variant="outline"
-                    onClick={() => promote(item)}
-                    loading={moveToBoard.isPending && moveToBoard.variables === item.id}
-                  >
-                    <ArrowRightCircle className="h-4 w-4" /> Move to board
-                  </Button>
-                  <button
-                    onClick={() => deleteItem.mutate(item.id)}
-                    aria-label={`Delete ${item.title}`}
-                    className={cn(
-                      'flex h-8 w-8 items-center justify-center rounded-md text-muted-foreground hover:bg-muted hover:text-destructive',
-                    )}
-                  >
-                    <Trash2 className="h-4 w-4" />
-                  </button>
-                </div>
-              </li>
-            ))}
-          </ul>
-        </div>
+        <WorkItemsTable
+          isLoading={itemsQuery.isLoading}
+          rows={itemsQuery.data ?? []}
+          rowKey={(i) => i.id}
+          searchText={(i) => [backlogKey(i), i.title, i.customerName, i.vehicleName, i.note].filter(Boolean).join(' ')}
+          searchPlaceholder="Search backlog…"
+          toolbarExtra={
+            <Button onClick={openCreate}>
+              <Plus className="h-4 w-4" /> New Job
+            </Button>
+          }
+          defaultSortKey="created"
+          defaultSortDir="desc"
+          itemNoun="items"
+          columns={columns}
+          emptyTitle="Backlog is empty"
+          emptyDescription="Add your first item above to start planning work."
+          rowActionsHeader="Actions"
+          rowActions={(item) => (
+            <div className="flex items-center justify-end gap-1">
+              <Button
+                size="sm"
+                variant="outline"
+                onClick={() => promote(item)}
+                loading={moveToBoard.isPending && moveToBoard.variables === item.id}
+              >
+                <ArrowRightCircle className="h-4 w-4" /> Move to board
+              </Button>
+              <button
+                onClick={() => deleteItem.mutate(item.id)}
+                aria-label={`Delete ${item.title}`}
+                className="flex h-8 w-8 items-center justify-center rounded-md text-muted-foreground hover:bg-muted hover:text-destructive"
+              >
+                <Trash2 className="h-4 w-4" />
+              </button>
+            </div>
+          )}
+        />
       )}
     </div>
   )

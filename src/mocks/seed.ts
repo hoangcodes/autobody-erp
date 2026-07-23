@@ -68,11 +68,11 @@ export const MOCK_ROLES = ['View Only', 'Edit Only', 'Administrator'] as const
 
 // team members (service writers + technicians) referenced by orders
 export const MOCK_USERS = [
-  { id: 'u_admin', name: 'Kevin Du' },
-  { id: 'u_mike', name: 'Mike Rooney' },
-  { id: 'u_sara', name: 'Sara Lopez' },
-  { id: 'u_dev', name: 'Dev Patel' },
-  { id: 'u_tanya', name: 'Tanya Cole' },
+  { id: 'u_admin', name: 'Kevin Du', role: 'Administrator' },
+  { id: 'u_mike', name: 'Mike Rooney', role: 'Technician' },
+  { id: 'u_sara', name: 'Sara Lopez', role: 'Service Advisor' },
+  { id: 'u_dev', name: 'Dev Patel', role: 'Technician' },
+  { id: 'u_tanya', name: 'Tanya Cole', role: 'Service Advisor' },
 ]
 
 // ---- workflow columns -------------------------------------------------------
@@ -432,6 +432,11 @@ MOCK_ORDERS.forEach((o, i) => {
   start.setDate(start.getDate() - 3 + (i % 10))
   o.startDate = start.toISOString().slice(0, 10)
   o.description = ORDER_DESCRIPTIONS[o.id] ?? ''
+  // Created / Updated timestamps for the order-detail Details panel and the
+  // Jira-style work-items lists. Stagger createdAt into the past; updatedAt
+  // tracks the most recent activity (falling back to createdAt).
+  o.createdAt = days(-30 + (i % 14))
+  o.updatedAt = o.lastActivityAt ?? o.createdAt
 })
 
 // ---- payments (drive paid/remaining on cards) -------------------------------
@@ -526,6 +531,17 @@ export const MOCK_AUDIT: AuditLog[] = [
   { id: 'au_1', entityType: 'order', entityId: 'o7', action: 'status_change', actorId: 'u_mike', actorType: 'user', before: { workflowStatusId: 'ws_dropped' }, after: { workflowStatusId: 'ws_progress' }, at: hours(-1) },
   { id: 'au_2', entityType: 'payment', entityId: 'pay_3', action: 'payment_captured', actorId: 'u_sara', actorType: 'user', after: { amount: 264.11, method: 'card_present' }, at: hours(-3) },
   { id: 'au_3', entityType: 'customer', entityId: 'c1', action: 'update', actorId: 'u_admin', actorType: 'user', before: { tags: [] }, after: { tags: ['VIP'] }, at: days(-1) },
+
+  // ---- field-level order edits (power the NetSuite-style System notes tab) ----
+  { id: 'au_10', entityType: 'order', entityId: 'o7', action: 'create', actorId: 'u_sara', actorType: 'user', after: { status: 'estimate' }, at: days(-4) },
+  { id: 'au_11', entityType: 'order', entityId: 'o7', action: 'update', actorId: 'u_sara', actorType: 'user', before: { priority: 'medium', description: '' }, after: { priority: 'high', description: 'Customer approved teardown; awaiting head gasket set.' }, at: days(-3) },
+  { id: 'au_12', entityType: 'order', entityId: 'o7', action: 'update', actorId: 'u_mike', actorType: 'user', before: { effort: 'medium', startDate: '' }, after: { effort: 'high', startDate: '2026-07-18' }, at: hours(-26) },
+
+  { id: 'au_20', entityType: 'order', entityId: 'o1', action: 'create', actorId: 'u_sara', actorType: 'user', after: { status: 'estimate' }, at: days(-2) },
+  { id: 'au_21', entityType: 'order', entityId: 'o1', action: 'update', actorId: 'u_admin', actorType: 'user', before: { priority: 'medium' }, after: { priority: 'high' }, at: days(-1) },
+  { id: 'au_22', entityType: 'order', entityId: 'o1', action: 'status_change', actorId: 'u_admin', actorType: 'user', before: { workflowStatusId: 'ws_progress' }, after: { workflowStatusId: 'ws_dropped' }, at: hours(-5) },
+
+  { id: 'au_30', entityType: 'order', entityId: 'o10', action: 'update', actorId: 'u_mike', actorType: 'user', before: { title: 'Timing Belt', description: '' }, after: { title: 'Timing Belt Service', description: 'Includes water pump while accessible.' }, at: hours(-4) },
 ]
 
 // ---- inventory --------------------------------------------------------------

@@ -12,6 +12,7 @@ import type {
   BacklogItem,
   Conversation,
   Customer,
+  FinancialLine,
   FinancialStatement,
   FinancialStatementsResponse,
   LineItem,
@@ -46,6 +47,7 @@ import {
   MOCK_WORKFLOW_STATUSES,
   deriveConversations,
 } from '@/mocks/seed'
+import { summarizeBoardGl, type BoardGlSummary } from '@/features/orders/glImpact'
 
 const TAX_RATE = 0.0825
 
@@ -163,9 +165,32 @@ function recomputeOrder(order: Order): Order {
 // recompute all seeded orders once at boot
 store.orders.forEach(recomputeOrder)
 
+// Seed per-column board ordering (`boardPosition`) from the initial array order
+// so the kanban board has a stable, persisted card order to sort by. Positions
+// are only meaningful WITHIN a column, so we number each column independently.
+function renumberColumn(workflowStatusId: string) {
+  store.orders
+    .filter((o) => o.workflowStatusId === workflowStatusId)
+    .sort((a, b) => (a.boardPosition ?? 0) - (b.boardPosition ?? 0))
+    .forEach((o, i) => {
+      o.boardPosition = i
+    })
+}
+{
+  const seen = new Set<string>()
+  for (const o of store.orders) {
+    if (seen.has(o.workflowStatusId)) continue
+    seen.add(o.workflowStatusId)
+    renumberColumn(o.workflowStatusId)
+  }
+}
+
 const getOrder = (id: string) => store.orders.find((o) => o.id === id)
 const touch = (order: Order | undefined) => {
-  if (order) order.lastActivityAt = nowIso()
+  if (order) {
+    order.lastActivityAt = nowIso()
+    order.updatedAt = nowIso()
+  }
 }
 function addActivity(entry: Partial<OrderActivity> & Pick<OrderActivity, 'orderId' | 'kind' | 'actorType'>) {
   store.activity.unshift({
@@ -175,6 +200,53 @@ function addActivity(entry: Partial<OrderActivity> & Pick<OrderActivity, 'orderI
     at: nowIso(),
     ...entry,
   } as OrderActivity)
+}
+
+// Primitive order fields whose edits are worth recording as NetSuite-style
+// field-change rows (System notes tab). Arrays/objects (labels, mechanicIds,
+// services, totals, attachments…) are intentionally skipped to keep the log
+// readable.
+const AUDITED_ORDER_FIELDS = new Set([
+  'title',
+  'description',
+  'priority',
+  'effort',
+  'startDate',
+  'dueAt',
+  'promisedAt',
+  'status',
+  'workflowStatusId',
+  'customerId',
+  'vehicleId',
+])
+
+/** Diff an incoming PATCH body against the current order and, for any changed
+ * primitive field, append an `update` audit entry (per-field before/after +
+ * actor). Powers the System notes tab. */
+function recordOrderFieldChanges(order: Order, body: Record<string, unknown>) {
+  const isPrimitive = (v: unknown) => v == null || typeof v !== 'object'
+  const before: Record<string, unknown> = {}
+  const after: Record<string, unknown> = {}
+  for (const [key, next] of Object.entries(body)) {
+    if (!AUDITED_ORDER_FIELDS.has(key)) continue
+    const prev = (order as unknown as Record<string, unknown>)[key]
+    if (!isPrimitive(prev) || !isPrimitive(next)) continue
+    if ((prev ?? '') === (next ?? '')) continue
+    before[key] = prev ?? ''
+    after[key] = next ?? ''
+  }
+  if (Object.keys(after).length === 0) return
+  store.audit.unshift({
+    id: nextId('au'),
+    entityType: 'order',
+    entityId: order.id,
+    action: 'update',
+    actorId: store.me.user.id,
+    actorType: 'user',
+    before,
+    after,
+    at: nowIso(),
+  })
 }
 
 // ---- tiny router ------------------------------------------------------------
@@ -313,12 +385,16 @@ route('POST', '/backlog-items/:id/move-to-board', ({ params }) => {
     paidTotal: 0,
     balanceDue: 0,
     lastActivityAt: nowIso(),
+    createdAt: nowIso(),
+    updatedAt: nowIso(),
     services: [],
     labels: [],
     mechanicIds: [],
     title: item.title,
   }
+  o.boardPosition = -1
   store.orders.unshift(recomputeOrder(o))
+  renumberColumn(o.workflowStatusId)
   store.backlogItems = store.backlogItems.filter((i) => i.id !== item.id)
   addActivity({ orderId: o.id, kind: 'system_event', actorType: 'system', body: `Estimate #${o.number} created from backlog.` })
   return o
@@ -363,6 +439,8 @@ route('POST', '/orders', ({ body }) => {
     paidTotal: 0,
     balanceDue: 0,
     lastActivityAt: nowIso(),
+    createdAt: nowIso(),
+    updatedAt: nowIso(),
     services: [],
     labels: [],
     mechanicIds: [],
@@ -371,15 +449,18 @@ route('POST', '/orders', ({ body }) => {
     priority: 'medium',
     startDate: nowIso().slice(0, 10),
     description: '',
+    boardPosition: -1,
     ...b,
   }
   store.orders.unshift(recomputeOrder(o))
+  renumberColumn(o.workflowStatusId)
   addActivity({ orderId: o.id, kind: 'system_event', actorType: 'system', body: `Estimate #${o.number} created.` })
   return o
 })
 route('PATCH', '/orders/:id', ({ params, body }) => {
   const o = getOrder(params.id!)
   if (!o) throw new MockError(404, 'not_found', 'order')
+  recordOrderFieldChanges(o, (body ?? {}) as Record<string, unknown>)
   Object.assign(o, body)
   touch(recomputeOrder(o))
   return o
@@ -404,6 +485,46 @@ route('PATCH', '/orders/:id/workflow', ({ params, body }) => {
   touch(recomputeOrder(o))
   addActivity({ orderId: o.id, kind: 'status_change', actorType: 'user', authorId: 'u_admin', body: `Moved to ${target?.name ?? to}.` })
   store.audit.unshift({ id: nextId('au'), entityType: 'order', entityId: o.id, action: 'status_change', actorId: 'u_admin', actorType: 'user', before: { workflowStatusId: from }, after: { workflowStatusId: to }, at: nowIso() })
+  return o
+})
+// Positional move (kanban drag-and-drop): set the order's column AND its slot
+// within that column (`index`), then persist by renumbering `boardPosition` so
+// the card stays where it was dropped — both within a column and across
+// columns. Column-conversion rules mirror PATCH /orders/:id/workflow.
+route('PATCH', '/orders/:id/move', ({ params, body }) => {
+  const o = getOrder(params.id!)
+  if (!o) throw new MockError(404, 'not_found', 'order')
+  const b = (body ?? {}) as { workflowStatusId?: string; index?: number }
+  const from = o.workflowStatusId
+  const to = b.workflowStatusId ?? from
+  const changedColumn = to !== from
+  o.workflowStatusId = to
+
+  // Rebuild the target column's order: everyone already there (minus the moved
+  // card), sorted by current position, with the moved card spliced in at `index`.
+  const members = store.orders
+    .filter((x) => x.workflowStatusId === to && x.id !== o.id)
+    .sort((a, b2) => (a.boardPosition ?? 0) - (b2.boardPosition ?? 0))
+  const index = Math.max(0, Math.min(b.index ?? members.length, members.length))
+  members.splice(index, 0, o)
+  members.forEach((x, i) => {
+    x.boardPosition = i
+  })
+  // Compact the source column too so its ranks stay contiguous.
+  if (changedColumn) renumberColumn(from)
+
+  // Apply the same column-conversion rules as the workflow route.
+  const target = store.workflowStatuses.find((s) => s.id === to)
+  if (target?.rule === 'convert_to_repair_order' && o.status === 'estimate') o.status = 'repair_order'
+  if (target?.rule === 'convert_to_invoice') {
+    o.status = 'invoice'
+    o.invoicedAt = o.invoicedAt ?? nowIso()
+  }
+  touch(recomputeOrder(o))
+  if (changedColumn) {
+    addActivity({ orderId: o.id, kind: 'status_change', actorType: 'user', authorId: 'u_admin', body: `Moved to ${target?.name ?? to}.` })
+    store.audit.unshift({ id: nextId('au'), entityType: 'order', entityId: o.id, action: 'status_change', actorId: 'u_admin', actorType: 'user', before: { workflowStatusId: from }, after: { workflowStatusId: to }, at: nowIso() })
+  }
   return o
 })
 route('POST', '/orders/:id/convert', ({ params, body }) => {
@@ -785,12 +906,156 @@ function projectStatement(base: FinancialStatement, g: Granularity, periods: str
   }
 }
 
+// ---- board-derived GL → financial statements -------------------------------
+// Aggregate the per-order GL (same `orderGlLines` logic the modal shows) across
+// ALL orders and fold it into the statement TEMPLATE's baseline figures, then
+// recompute the dependent subtotals/totals and a balancing Retained earnings
+// line so the Balance Sheet identity (Assets = Liabilities + Equity) still
+// holds. `projectStatement` then scales that board-derived baseline per selected
+// period exactly as before, so the footer/drill-down/xlsx all keep working and
+// the reports genuinely mirror the board.
+
+function boardGlSummary(): BoardGlSummary {
+  const nameById = new Map(store.workflowStatuses.map((s) => [s.id, s.name]))
+  // "non-archived orders": orders live independently of column archival, so we
+  // roll up every order in the store.
+  return summarizeBoardGl(store.orders, (o) => nameById.get(o.workflowStatusId))
+}
+
+const findLine = (lines: FinancialLine[], id: string) => lines.find((l) => l.id === id)
+const findDetail = (line: FinancialLine | undefined, label: string) =>
+  line?.detail?.find((d) => d.label === label)
+
+/** Set a line's total and proportionally rescale its drill-down detail so the
+ * detail keeps summing to the (new) line total — divide-by-zero safe. */
+function setLineTotal(line: FinancialLine | undefined, newTotal: number): void {
+  if (!line) return
+  const detail = line.detail
+  if (detail && detail.length) {
+    const oldTotal = detail.reduce((s, d) => s + d.current, 0)
+    if (oldTotal !== 0) {
+      const f = newTotal / oldTotal
+      detail.forEach((d) => (d.current = Math.round(d.current * f)))
+    } else {
+      const each = Math.round(newTotal / detail.length)
+      detail.forEach((d) => (d.current = each))
+    }
+    // Absorb any rounding drift into the last detail row.
+    const sum = detail.reduce((s, d) => s + d.current, 0)
+    detail[detail.length - 1]!.current += newTotal - sum
+  }
+  line.current = newTotal
+}
+
+function applyBoardGl(base: FinancialStatementsResponse): FinancialStatementsResponse {
+  const s = boardGlSummary()
+  const next = clone(base)
+
+  // ----- Income Statement -----
+  const is = next.incomeStatement.lines
+  const revLabor = findLine(is, 'rev_labor')
+  const revIds = ['rev_labor', 'rev_parts', 'rev_tires', 'rev_fees']
+  const baseRevSum = revIds.reduce((t, id) => t + (findLine(is, id)?.current ?? 0), 0)
+  const revF = baseRevSum > 0 ? s.revenueAll / baseRevSum : 0
+  for (const id of revIds) {
+    const l = findLine(is, id)
+    if (l) setLineTotal(l, Math.round((l.current ?? 0) * revF))
+  }
+  const revTotal = revIds.reduce((t, id) => t + (findLine(is, id)?.current ?? 0), 0)
+  // If the template had no revenue lines to scale, still reflect board revenue.
+  if (baseRevSum === 0 && revLabor) setLineTotal(revLabor, s.revenueAll)
+  const revenueLine = findLine(is, 'rev_total')
+  if (revenueLine) revenueLine.current = baseRevSum > 0 ? revTotal : s.revenueAll
+
+  const cogsIds = ['cogs_parts', 'cogs_labor']
+  const baseCogsSum = cogsIds.reduce((t, id) => t + (findLine(is, id)?.current ?? 0), 0)
+  const cogsF = baseCogsSum > 0 ? s.costBilled / baseCogsSum : 0
+  for (const id of cogsIds) {
+    const l = findLine(is, id)
+    if (l) setLineTotal(l, Math.round((l.current ?? 0) * cogsF))
+  }
+  const cogsTotal = cogsIds.reduce((t, id) => t + (findLine(is, id)?.current ?? 0), 0)
+  const cogsLine = findLine(is, 'cogs_total')
+  if (cogsLine) cogsLine.current = baseCogsSum > 0 ? cogsTotal : s.costBilled
+
+  const revenue = revenueLine?.current ?? s.revenueAll
+  const cogs = cogsLine?.current ?? s.costBilled
+  const grossProfit = revenue - cogs
+  const gp = findLine(is, 'gross_profit')
+  if (gp) gp.current = grossProfit
+
+  // Keep the rest of the IS internally consistent (opex/other lines unchanged).
+  const opexTotal = findLine(is, 'opex_total')?.current ?? 0
+  const opIncome = grossProfit - opexTotal
+  const opIncomeLine = findLine(is, 'op_income')
+  if (opIncomeLine) opIncomeLine.current = opIncome
+  const intExp = findLine(is, 'int_exp')?.current ?? 0
+  const taxExp = findLine(is, 'tax_exp')?.current ?? 0
+  const netIncome = opIncome + intExp + taxExp
+  const netIncomeLine = findLine(is, 'net_income')
+  if (netIncomeLine) netIncomeLine.current = netIncome
+
+  // ----- Balance Sheet -----
+  const bs = next.balanceSheet.lines
+  const cashLine = findLine(bs, 'ca_cash')
+  const baseCash = cashLine?.current ?? 0
+  const newCash = baseCash + s.cashDone
+  if (cashLine) {
+    // Book collected cash into the operating account detail row (keeps detail summing).
+    const op = findDetail(cashLine, 'Operating account')
+    if (op) op.current += s.cashDone
+    cashLine.current = newCash
+  }
+
+  const arLine = findLine(bs, 'ca_ar')
+  setLineTotal(arLine, s.arBilled)
+  const newAr = arLine?.current ?? s.arBilled
+
+  const invLine = findLine(bs, 'ca_inv')
+  const newInv = (invLine?.current ?? 0) - s.invBilled
+  if (invLine) invLine.current = newInv
+
+  const caTotalLine = findLine(bs, 'ca_total')
+  const caTotal = newCash + newAr + newInv
+  if (caTotalLine) caTotalLine.current = caTotal
+
+  const ncaTotal = findLine(bs, 'nca_total')?.current ?? 0
+  const assetsTotal = caTotal + ncaTotal
+  const assetsTotalLine = findLine(bs, 'assets_total')
+  if (assetsTotalLine) assetsTotalLine.current = assetsTotal
+
+  const liabTotal = findLine(bs, 'liab_total')?.current ?? 0
+  const paidIn = findLine(bs, 'eq_paid')?.current ?? 0
+
+  // Balancing plug: Retained earnings = Assets − Liabilities − Paid-in capital.
+  const retained = assetsTotal - liabTotal - paidIn
+  const reLine = findLine(bs, 'eq_re')
+  if (reLine) {
+    reLine.current = retained
+    // Keep the drill-down consistent: beginning = RE − net income − distributions.
+    const dist = findDetail(reLine, 'Distributions')?.current ?? 0
+    const netInDetail = findDetail(reLine, 'Net income for period')
+    if (netInDetail) netInDetail.current = netIncome
+    const beginning = findDetail(reLine, 'Beginning balance')
+    if (beginning) beginning.current = retained - netIncome - dist
+  }
+  const eqTotalLine = findLine(bs, 'eq_total')
+  const eqTotal = paidIn + retained
+  if (eqTotalLine) eqTotalLine.current = eqTotal
+  const liabEqLine = findLine(bs, 'liab_eq_total')
+  if (liabEqLine) liabEqLine.current = liabTotal + eqTotal // == assetsTotal
+
+  return next
+}
+
 function buildFinancials(g: Granularity, periods: string[]): FinancialStatementsResponse {
   const sel = periods.length ? periods : defaultPeriods(g)
+  // Fold the aggregated board GL into the baseline template, THEN scale per period.
+  const base = applyBoardGl(store.financials)
   return {
-    currency: store.financials.currency,
-    incomeStatement: projectStatement(store.financials.incomeStatement, g, sel),
-    balanceSheet: projectStatement(store.financials.balanceSheet, g, sel),
+    currency: base.currency,
+    incomeStatement: projectStatement(base.incomeStatement, g, sel),
+    balanceSheet: projectStatement(base.balanceSheet, g, sel),
   }
 }
 

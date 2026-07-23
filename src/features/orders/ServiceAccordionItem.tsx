@@ -1,28 +1,27 @@
 import * as React from 'react'
 import { ChevronDown, ChevronRight } from 'lucide-react'
-import type { LineItem, LineItemType, Service } from '@/types'
+import type { LineItem, Service } from '@/types'
 import { Badge } from '@/components/ui/Badge'
 import { Button } from '@/components/ui/Button'
 import { Input } from '@/components/ui/Input'
-import { Select, SelectContent, SelectItem, SelectTrigger, SelectValue } from '@/components/ui/Select'
 import { LineItemRow } from '@/features/orders/LineItemRow'
 import { AUTH_STATUS_LABEL, AUTH_STATUS_VARIANT } from '@/features/orders/statusDisplay'
 import { formatMoney } from '@/lib/utils'
 
 export interface ServiceAccordionItemProps {
   service: Service
-  onUpdateService: (body: Partial<Service>) => void
   onDeleteService: () => void
   onAddLineItem: (body: Partial<LineItem>) => void
   onUpdateLineItem: (itemId: string, body: Partial<LineItem>) => void
   onDeleteLineItem: (itemId: string) => void
 }
 
+/** A blank line item. Regular items default to `part` so the Quantity field maps
+ * to `quantity` (labor items bill by hours; discounts are added separately). */
 const emptyLine = (): Partial<LineItem> => ({
-  type: 'labor',
+  type: 'part',
   name: '',
   quantity: 1,
-  hours: 1,
   unitCost: 0,
   unitRetail: 0,
   taxable: true,
@@ -30,7 +29,6 @@ const emptyLine = (): Partial<LineItem> => ({
 
 export function ServiceAccordionItem({
   service,
-  onUpdateService,
   onDeleteService,
   onAddLineItem,
   onUpdateLineItem,
@@ -43,8 +41,13 @@ export function ServiceAccordionItem({
   const lineItems = service.lineItems ?? []
   const serviceTotal = lineItems.reduce((sum, li) => {
     const qty = li.quantity ?? 1
-    return sum + (li.type === 'labor' ? (li.hours ?? 0) * qty * (li.unitRetail ?? 0) : qty * (li.unitRetail ?? 0))
+    const amount = li.type === 'labor' ? (li.hours ?? 0) * qty * (li.unitRetail ?? 0) : qty * (li.unitRetail ?? 0)
+    return sum + (li.type === 'discount' ? -amount : amount)
   }, 0)
+
+  function addDiscount() {
+    onAddLineItem({ type: 'discount', name: 'Discount', quantity: 1, unitCost: 0, unitRetail: 0, taxable: false })
+  }
 
   return (
     <div className="rounded-lg border border-border bg-card">
@@ -58,8 +61,6 @@ export function ServiceAccordionItem({
             {expanded ? <ChevronDown className="h-4 w-4" /> : <ChevronRight className="h-4 w-4" />}
           </span>
           <span className="text-sm font-semibold">{service.title}</span>
-          {service.flags.recommended && <Badge variant="warning">Recommended</Badge>}
-          {service.flags.lumpSum && <Badge variant="secondary">Lump sum</Badge>}
           <Badge variant={AUTH_STATUS_VARIANT[service.authorizationStatus]}>
             {AUTH_STATUS_LABEL[service.authorizationStatus]}
           </Badge>
@@ -73,28 +74,16 @@ export function ServiceAccordionItem({
 
       {expanded && (
         <div className="border-t border-border p-3 pt-2">
-          <div className="mb-2 flex flex-wrap gap-3 text-xs">
-            {(
-              [
-                ['recommended', 'Recommended'],
-                ['lumpSum', 'Lump sum'],
-                ['hideLineItemPricing', 'Hide line pricing'],
-                ['hideFromCustomer', 'Hide from customer'],
-              ] as const
-            ).map(([key, label]) => (
-              <label key={key} className="flex items-center gap-1.5">
-                <input
-                  type="checkbox"
-                  checked={service.flags[key]}
-                  onChange={(e) => onUpdateService({ flags: { ...service.flags, [key]: e.target.checked } })}
-                />
-                {label}
-              </label>
-            ))}
-          </div>
-
           {lineItems.length > 0 && (
-            <div className="mb-2 rounded-md border border-border/70">
+            <div className="mb-2 w-full overflow-hidden rounded-md border border-border/70">
+              {/* Column header — Item | Quantity | Price | Amount. */}
+              <div className="grid grid-cols-[minmax(0,1fr)_4.5rem_6rem_6rem_4.5rem] items-center gap-2 border-b border-border bg-muted/50 px-3 py-2 text-[11px] font-semibold uppercase tracking-wide text-muted-foreground">
+                <span>Item</span>
+                <span className="text-right">Quantity</span>
+                <span className="text-right">Price</span>
+                <span className="text-right">Amount</span>
+                <span className="sr-only">Actions</span>
+              </div>
               {lineItems.map((li) => (
                 <LineItemRow
                   key={li.id}
@@ -107,58 +96,30 @@ export function ServiceAccordionItem({
           )}
 
           {addingLine ? (
-            <div className="grid grid-cols-12 items-center gap-2 rounded-md border border-dashed border-primary-300 bg-primary-50/40 p-2">
-              <div className="col-span-2">
-                <Select
-                  value={draft.type}
-                  onValueChange={(v) => setDraft((d) => ({ ...d, type: v as LineItemType }))}
-                >
-                  <SelectTrigger className="h-8 text-xs">
-                    <SelectValue />
-                  </SelectTrigger>
-                  <SelectContent>
-                    {(['labor', 'part', 'tire', 'subcontract', 'fee', 'discount', 'shop_supplies', 'epa_fee'] as const).map(
-                      (t) => (
-                        <SelectItem key={t} value={t}>
-                          {t}
-                        </SelectItem>
-                      ),
-                    )}
-                  </SelectContent>
-                </Select>
-              </div>
+            <div className="grid grid-cols-[minmax(0,1fr)_4.5rem_6rem_auto] items-center gap-2 rounded-md border border-dashed border-primary-300 bg-primary-50/40 p-2 dark:border-primary-500/40 dark:bg-primary-500/5">
               <Input
-                className="col-span-4 h-8 text-sm"
-                placeholder="Line item name"
+                className="h-8 text-sm"
+                placeholder="Item"
                 value={draft.name}
                 onChange={(e) => setDraft((d) => ({ ...d, name: e.target.value }))}
               />
               <Input
                 type="number"
-                className="col-span-1 h-8 text-sm"
-                placeholder="Qty/hrs"
-                value={draft.type === 'labor' ? (draft.hours ?? 0) : (draft.quantity ?? 1)}
-                onChange={(e) =>
-                  setDraft((d) =>
-                    d.type === 'labor' ? { ...d, hours: Number(e.target.value) } : { ...d, quantity: Number(e.target.value) },
-                  )
-                }
+                className="h-8 text-right text-sm"
+                placeholder="Qty"
+                aria-label="Quantity"
+                value={draft.quantity ?? 1}
+                onChange={(e) => setDraft((d) => ({ ...d, quantity: Number(e.target.value) }))}
               />
               <Input
                 type="number"
-                className="col-span-2 h-8 text-sm"
-                placeholder="Unit price"
+                className="h-8 text-right text-sm"
+                placeholder="Price"
+                aria-label="Price"
                 value={draft.unitRetail ?? 0}
                 onChange={(e) => setDraft((d) => ({ ...d, unitRetail: Number(e.target.value) }))}
               />
-              <Input
-                type="number"
-                className="col-span-2 h-8 text-sm"
-                placeholder="Unit cost"
-                value={draft.unitCost ?? 0}
-                onChange={(e) => setDraft((d) => ({ ...d, unitCost: Number(e.target.value) }))}
-              />
-              <div className="col-span-1 flex justify-end gap-1">
+              <div className="flex justify-end gap-1">
                 <Button
                   size="sm"
                   className="h-7 px-2 text-xs"
@@ -171,12 +132,28 @@ export function ServiceAccordionItem({
                 >
                   Add
                 </Button>
+                <Button
+                  size="sm"
+                  variant="ghost"
+                  className="h-7 px-2 text-xs"
+                  onClick={() => {
+                    setDraft(emptyLine())
+                    setAddingLine(false)
+                  }}
+                >
+                  Cancel
+                </Button>
               </div>
             </div>
           ) : (
-            <Button variant="outline" size="sm" onClick={() => setAddingLine(true)}>
-              + Add line item
-            </Button>
+            <div className="flex flex-wrap items-center gap-2">
+              <Button variant="outline" size="sm" onClick={() => setAddingLine(true)}>
+                + Add line item
+              </Button>
+              <Button variant="ghost" size="sm" onClick={addDiscount}>
+                + Add discount
+              </Button>
+            </div>
           )}
         </div>
       )}

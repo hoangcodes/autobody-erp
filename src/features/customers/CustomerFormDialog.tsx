@@ -77,11 +77,14 @@ export interface CustomerFormDialogProps {
   onClose: () => void
   /** When provided, the dialog edits this customer; otherwise it creates a new one. */
   customer?: Customer
+  /** Fired with the newly-created customer (create mode only) — lets callers
+   * select the record they just created (e.g. the Customer combobox). */
+  onCreated?: (customer: Customer) => void
 }
 
 /** Create/edit form covering identity, contact, and intake demographics.
  * DOB takes priority over the manual age range when present. */
-export function CustomerFormDialog({ open, onClose, customer }: CustomerFormDialogProps) {
+export function CustomerFormDialog({ open, onClose, customer, onCreated }: CustomerFormDialogProps) {
   const isEdit = Boolean(customer)
   const createCustomer = useCreateCustomer()
   const updateCustomer = useUpdateCustomer(customer?.id ?? '')
@@ -171,8 +174,9 @@ export function CustomerFormDialog({ open, onClose, customer }: CustomerFormDial
       createCustomer.mutate(
         { type: 'individual', preferredContactMethod: 'sms', taxExempt: false, tags: [], ...body },
         {
-          onSuccess: () => {
+          onSuccess: (created) => {
             toast.success('Customer created')
+            onCreated?.(created)
             onClose()
           },
           onError: (err) => toast.error('Could not create customer', err instanceof Error ? err.message : undefined),

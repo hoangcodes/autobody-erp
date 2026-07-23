@@ -7,6 +7,9 @@ import { queryKeys } from '@/lib/queryClient'
 export interface TeamMember {
   id: string
   name: string
+  /** Display role (e.g. "Technician", "Service Advisor"). Drives the System
+   * notes "Role" column. */
+  role?: string
 }
 
 /** The mechanic / team roster. Reused for the board mechanic-avatar filter, the
